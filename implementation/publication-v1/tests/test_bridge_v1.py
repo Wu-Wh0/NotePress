@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "tests" / "bridge-output"
+OUTPUT = Path(tempfile.gettempdir()) / "publication-v1-bridge-output"
 BRIDGE = ROOT / "bridge"
 sys.path.insert(0, str(BRIDGE))
 from local_preview_bridge import LocalPreviewBridge
@@ -330,7 +330,7 @@ class LocalBridgeTracerTests(unittest.TestCase):
                 text=True,
                 timeout=60,
                 check=False,
-                env={**os.environ, "TMPDIR": os.environ.get("TMPDIR", "/mnt/e/Hermes/cache/scratch")},
+                env=dict(os.environ),
             )
             fetched = None
             if proc.returncode == 0:

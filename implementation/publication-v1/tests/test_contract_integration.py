@@ -23,9 +23,13 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCER = ROOT / "producer"
-NODE = Path("/home/Wh0-0/projects/blog/spikes/004-wordpress-roundtrip/runtime/node-v24.21.0-linux-x64/bin/node")
 sys.path.insert(0, str(PRODUCER))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from package_builder import build
+from runtime_paths import node_binary
+from test_wordpress_runtime import cached_modules
+
+NODE = node_binary()
 
 OPERATION_ID = "0123456789abcdef0123456789abcdef"
 
@@ -44,15 +48,7 @@ def png_fixture() -> bytes:
 
 
 def cached_php_wasm_node_modules() -> Path:
-    candidates = Path.home().glob(".npm/_npx/*/node_modules/@php-wasm/node-8-3/package.json")
-    for package in sorted(candidates):
-        metadata = json.loads(package.read_text(encoding="utf-8"))
-        modules = package.parents[2]
-        universal = modules / "@php-wasm" / "universal" / "index.js"
-        wasm83 = modules / "@php-wasm" / "node-8-3" / "index.js"
-        if metadata.get("version") == "3.1.56" and universal.is_file() and wasm83.is_file():
-            return modules
-    raise AssertionError("cached PHP-WASM 8.3 runtime from the prior local harness is unavailable")
+    return cached_modules()
 
 
 NODE_RUNNER = r'''import fs from 'node:fs';
@@ -183,7 +179,7 @@ class ProducerServerContractTests(unittest.TestCase):
                 text=True,
                 check=False,
                 timeout=120,
-                env={**os.environ, "TMPDIR": os.environ.get("TMPDIR", "/mnt/e/Hermes/cache/scratch")},
+                env=dict(os.environ),
             )
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             result_line = next((line for line in proc.stdout.splitlines() if line.startswith("PHP_WASM_RESULT=")), None)

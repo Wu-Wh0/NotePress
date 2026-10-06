@@ -18,13 +18,15 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCER = ROOT / "producer"
 SERVER = ROOT / "server"
-RUNTIME_HOME = ROOT / "tests" / "wp-runtime-v1"
-NODE = Path("/home/Wh0-0/projects/blog/spikes/004-wordpress-roundtrip/runtime/node-v24.21.0-linux-x64/bin/node")
-WP_CORE = Path("/home/Wh0-0/projects/blog/spikes/008-approval-grant/runtime/wordpress")
-SQLITE_ZIP_NAME = "@wp-playground/cli/sqlite-database-integration.zip"
-
+RUNTIME_HOME = Path(tempfile.gettempdir()) / "publication-v1-wp-runtime"
 sys.path.insert(0, str(PRODUCER))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from package_builder import build
+from runtime_paths import node_binary, php_wasm_modules, wordpress_core
+
+NODE = node_binary()
+WP_CORE = wordpress_core()
+SQLITE_ZIP_NAME = "@wp-playground/cli/sqlite-database-integration.zip"
 
 
 def png_fixture() -> bytes:
@@ -41,18 +43,18 @@ def png_fixture() -> bytes:
 
 
 def cached_modules() -> Path:
-    candidates = Path.home().glob(".npm/_npx/*/node_modules/@php-wasm/node-8-3/package.json")
-    for package in sorted(candidates):
+    modules = php_wasm_modules()
+    for package_name in ("@php-wasm/node-8-3", "@php-wasm/universal", "@wp-playground/wordpress", "@wp-playground/cli"):
+        package = modules / package_name / "package.json"
+        if package.is_symlink() or not package.is_file():
+            raise AssertionError(f"pinned PHP-WASM runtime package missing: {package_name}")
         metadata = json.loads(package.read_text(encoding="utf-8"))
-        modules = package.parents[2]
-        if (
-            metadata.get("version") == "3.1.56"
-            and (modules / "@php-wasm/universal/index.js").is_file()
-            and (modules / "@php-wasm/node-8-3/index.js").is_file()
-            and (modules / SQLITE_ZIP_NAME).is_file()
-        ):
-            return modules
-    raise AssertionError("cached PHP-WASM/WordPress/SQLite integration unavailable; no install or network fallback")
+        if metadata.get("version") != "3.1.56":
+            raise AssertionError(f"pinned PHP-WASM runtime package version mismatch: {package_name}")
+    sqlite_zip = modules / SQLITE_ZIP_NAME
+    if sqlite_zip.is_symlink() or not sqlite_zip.is_file():
+        raise AssertionError("pinned SQLite integration ZIP missing")
+    return modules
 
 
 def build_article(
@@ -134,9 +136,8 @@ def run_isolated_wordpress(cases: list[dict], php_code: str | list[str]) -> tupl
         "phpCodes": [base64.b64encode(code.encode("utf-8")).decode("ascii") for code in scenario_codes],
     }
     encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
-    runner = RUNTIME_HOME / "wp-harness.mjs"
+    runner = ROOT / "tests" / "wp-runtime-v1" / "wp-harness.mjs"
     env = dict(os.environ)
-    env["TMPDIR"] = env.get("TMPDIR", "/mnt/e/Hermes/cache/scratch")
     proc = subprocess.run(
         [str(NODE), str(runner), encoded],
         capture_output=True,
