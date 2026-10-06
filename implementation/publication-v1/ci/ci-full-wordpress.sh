@@ -30,7 +30,7 @@ bash "$SCRIPT_DIR/ci-bootstrap.sh" "$runtime_root"
 bash "$SCRIPT_DIR/prepare-wordpress-core.sh" "$PUBLICATION_WP_CORE"
 
 python3 -B -m unittest discover -s "$PUB_ROOT/tests" -p 'test_*.py' -v
-"$node_bin" --test "$PUB_ROOT/tests/test_plugin_selection.js" "$PUB_ROOT/tests/test_plugin_entry.js"
+"$node_bin" --test "$PUB_ROOT/tests/test_plugin_selection.js" "$PUB_ROOT/tests/test_plugin_entry.js" "$PUB_ROOT/tests/test_session_launcher_argv.js"
 if command -v php >/dev/null; then
   for file in "$PUB_ROOT"/server/*.php; do php -l "$file"; done
 else
