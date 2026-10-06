@@ -15,9 +15,10 @@ from reader import read_selected, read_selected_asset
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECT = ROOT.parent.parent
-HISTORICAL = PROJECT / "spikes" / "029-recovery-event-integration"
-PARSER_ROOT = HISTORICAL / "runtime" / "parser"
-NODE = PROJECT / "spikes" / "004-wordpress-roundtrip" / "runtime" / "node-v24.21.0-linux-x64" / "bin" / "node"
+PRODUCER_ROOT = ROOT / "producer"
+TOOLCHAIN_ROOT = Path(os.environ.get("PUBLICATION_TOOLCHAIN_ROOT", str(PRODUCER_ROOT)))
+PARSER_ROOT = Path(os.environ.get("PUBLICATION_PARSER_ROOT", str(PROJECT / "ci" / "runtime" / "parser")))
+NODE = Path(os.environ.get("PUBLICATION_NODE") or shutil.which("node") or "")
 COMPILER_FILES = ("render.cjs", "reader.py", "package_builder.py")
 MAX_LABEL_BYTES = 16_000
 
@@ -31,18 +32,53 @@ def _canonical(value):
 
 
 def _toolchain():
-    dep_file = HISTORICAL / "producer" / "dependency-bytes.json"
-    lock_file = HISTORICAL / "producer" / "package-lock.json"
-    if dep_file.is_symlink() or lock_file.is_symlink() or not dep_file.is_file() or not lock_file.is_file():
+    expected_versions = {"katex": "0.16.22", "markdown-it": "14.1.0"}
+    dep_file = TOOLCHAIN_ROOT / "dependency-bytes.json"
+    lock_file = TOOLCHAIN_ROOT / "package-lock.json"
+    package_file = TOOLCHAIN_ROOT / "package.json"
+    if (
+        TOOLCHAIN_ROOT.is_symlink()
+        or not TOOLCHAIN_ROOT.is_dir()
+        or any(path.is_symlink() or not path.is_file() for path in (dep_file, lock_file, package_file))
+        or PARSER_ROOT.is_symlink()
+        or not PARSER_ROOT.is_dir()
+    ):
         raise ValueError("parser_dependency_binding_mismatch")
-    dep_bytes = dep_file.read_bytes()
-    expected = json.loads(dep_bytes)
-    if not isinstance(expected, dict) or not expected:
+    try:
+        dep_bytes = dep_file.read_bytes()
+        expected = json.loads(dep_bytes)
+        lock_bytes = lock_file.read_bytes()
+        lock = json.loads(lock_bytes)
+        package = json.loads(package_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("parser_dependency_binding_mismatch") from exc
+    lock_packages = lock.get("packages") if isinstance(lock, dict) else None
+    root_dependencies = lock_packages.get("", {}).get("dependencies") if isinstance(lock_packages, dict) else None
+    if (
+        not isinstance(expected, dict)
+        or not expected
+        or lock.get("lockfileVersion") != 3
+        or package.get("dependencies") != expected_versions
+        or root_dependencies != expected_versions
+    ):
         raise ValueError("parser_dependency_binding_mismatch")
     base = PARSER_ROOT / "node_modules"
+    if base.is_symlink() or not base.is_dir():
+        raise ValueError("parser_dependency_binding_mismatch")
+    for name, version in expected_versions.items():
+        entry = lock_packages.get(f"node_modules/{name}")
+        metadata = base / name / "package.json"
+        if not isinstance(entry, dict) or entry.get("version") != version or metadata.is_symlink() or not metadata.is_file():
+            raise ValueError("parser_dependency_binding_mismatch")
+        try:
+            installed = json.loads(metadata.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("parser_dependency_binding_mismatch") from exc
+        if installed.get("version") != version:
+            raise ValueError("parser_dependency_binding_mismatch")
     for relative, digest in expected.items():
         rel = Path(relative)
-        if rel.is_absolute() or ".." in rel.parts or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        if not relative or rel.is_absolute() or ".." in rel.parts or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("parser_dependency_binding_mismatch")
         item = base / rel
         probe = base
@@ -52,6 +88,8 @@ def _toolchain():
                 raise ValueError("parser_dependency_binding_mismatch")
         if not item.is_file() or _sha(item.read_bytes()) != digest:
             raise ValueError("parser_dependency_binding_mismatch")
+    if not {"markdown-it/package.json", "katex/package.json", "katex/dist/katex.min.css"}.issubset(expected):
+        raise ValueError("parser_dependency_binding_mismatch")
     if NODE.is_symlink() or not NODE.is_file():
         raise ValueError("pinned_node_runtime_unavailable")
     node_version = subprocess.run([str(NODE), "--version"], check=True, text=True, capture_output=True, timeout=10).stdout.strip()
@@ -59,10 +97,10 @@ def _toolchain():
         raise ValueError("pinned_node_runtime_mismatch")
     return {
         "node": node_version,
-        "markdown_it": json.loads((PARSER_ROOT / "node_modules" / "markdown-it" / "package.json").read_text(encoding="utf-8"))["version"],
-        "katex": json.loads((PARSER_ROOT / "node_modules" / "katex" / "package.json").read_text(encoding="utf-8"))["version"],
+        "markdown_it": expected_versions["markdown-it"],
+        "katex": expected_versions["katex"],
         "dependency_manifest_sha256": _sha(dep_bytes),
-        "package_lock_sha256": _sha(lock_file.read_bytes()),
+        "package_lock_sha256": _sha(lock_bytes),
     }
 
 

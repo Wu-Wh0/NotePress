@@ -1,0 +1,7 @@
+{
+  "name": "publication-v1-wordpress-runtime",
+  "private": true,
+  "dependencies": {
+    "@wp-playground/cli": "3.1.56"
+  }
+}

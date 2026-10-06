@@ -12,7 +12,7 @@ import unittest
 from test_wordpress_runtime import RUNTIME_HOME, build_article, run_isolated_wordpress
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "tests" / "ingest-output"
+OUTPUT = Path(tempfile.gettempdir()) / "publication-v1-ingest-output"
 EVIDENCE = OUTPUT / "latest.json"
 
 PHP_SCENARIO = r'''<?php

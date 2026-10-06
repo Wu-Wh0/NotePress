@@ -11,8 +11,13 @@ import zlib
 
 PRODUCER = Path(__file__).resolve().parents[1] / "producer"
 sys.path.insert(0, str(PRODUCER))
-from package_builder import NODE, PARSER_ROOT, build
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from package_builder import build
 from reader import read_selected
+from runtime_paths import node_binary, parser_root
+
+NODE = node_binary()
+PARSER_ROOT = parser_root()
 
 
 def run_renderer(text, labels=None, assets=None):
