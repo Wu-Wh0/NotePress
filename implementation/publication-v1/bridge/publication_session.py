@@ -652,6 +652,128 @@ class BridgeSession:
             remote = {"operation_id": operation_id, "state": "unknown", "digest": None}
         return {"receipt": dict(receipt), "remote": remote}
 
+    def frozen_preview(self, operation_id: str) -> dict:
+        """Return the exact current WordPress-frozen bytes for this saved source."""
+        self._ensure_open()
+        if self.transport is None or not callable(getattr(self.transport, "frozen_snapshot", None)):
+            raise ValueError("private_frozen_snapshot_transport_required")
+        status = self.status(operation_id)
+        receipt = status["receipt"]
+        remote = status["remote"]
+        if (receipt.get("state") != "pending"
+                or remote.get("state") not in {"pending", "approved"}
+                or remote.get("digest") != receipt.get("remote_digest")
+                or not isinstance(receipt.get("remote_digest"), str)
+                or not HEX64.fullmatch(receipt["remote_digest"])):
+            raise ValueError("frozen_snapshot_unavailable")
+        self._check_receipt_pins(receipt)
+        self._validate_remote_binding(receipt, remote)
+        package_id = receipt.get("manifest_sha256")
+        self._recheck(receipt, package_id)
+        try:
+            frozen = self.transport.frozen_snapshot(operation_id)
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError("remote_frozen_snapshot_unavailable") from None
+        required = {"id", "digest", "state", "snapshot_json"}
+        if not isinstance(frozen, dict) or set(frozen) != required:
+            raise ValueError("remote_frozen_snapshot_contract_mismatch")
+        if (frozen.get("id") != operation_id
+                or frozen.get("digest") != receipt["remote_digest"]
+                or frozen.get("state") != remote["state"]
+                or not isinstance(frozen.get("snapshot_json"), str)):
+            raise ValueError("remote_frozen_snapshot_binding_mismatch")
+        snapshot_json = frozen["snapshot_json"]
+        try:
+            raw = snapshot_json.encode("utf-8")
+            snapshot = json.loads(snapshot_json)
+            canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+            raise ValueError("remote_frozen_snapshot_json_invalid") from error
+        if (not raw or len(raw) > 1_048_576 or raw != canonical
+                or hashlib.sha256(raw).hexdigest() != receipt["remote_digest"]
+                or not isinstance(snapshot, dict)):
+            raise ValueError("remote_frozen_snapshot_digest_mismatch")
+        snapshot_fields = {
+            "schema", "operation_key", "selected", "source_sha256", "labels_sha256", "title",
+            "publisher_id", "site_origin", "visibility", "target_id", "baseline_sha256",
+            "manifest_sha256", "compiler", "compiler_sha256", "inventory", "content", "rendered",
+            "policy", "policy_sha256", "expires_at",
+        }
+        if set(snapshot) != snapshot_fields:
+            raise ValueError("remote_frozen_snapshot_shape_invalid")
+        binding = remote["binding"]
+        for field in ("operation_key", "selected", "source_sha256", "labels_sha256", "title", "site_origin", "content", "rendered"):
+            if not isinstance(snapshot.get(field), str):
+                raise ValueError("remote_frozen_snapshot_shape_invalid")
+        if (snapshot.get("schema") != "publication-v1"
+                or snapshot.get("operation_key") != operation_id
+                or snapshot.get("selected") != receipt.get("selected_path")
+                or snapshot.get("source_sha256") != receipt.get("source_sha256")
+                or snapshot.get("labels_sha256") != receipt.get("labels_sha256")
+                or hashlib.sha256(snapshot["title"].encode("utf-8")).hexdigest() != receipt.get("title_sha256")
+                or snapshot.get("manifest_sha256") != package_id
+                or snapshot.get("compiler_sha256") != receipt.get("compiler_sha256")
+                or snapshot.get("policy_sha256") != receipt.get("server_policy_sha256")
+                or snapshot.get("site_origin") != receipt.get("site_origin")
+                or snapshot.get("visibility") != "public"
+                or not isinstance(snapshot.get("target_id"), int)
+                or isinstance(snapshot["target_id"], bool) or snapshot["target_id"] != 0
+                or not snapshot["rendered"]
+                or not isinstance(snapshot.get("publisher_id"), int)
+                or isinstance(snapshot.get("publisher_id"), bool)
+                or not isinstance(snapshot.get("expires_at"), int)
+                or isinstance(snapshot.get("expires_at"), bool)):
+            raise ValueError("remote_frozen_snapshot_binding_mismatch")
+        expected = {
+            "publisher_id": snapshot["publisher_id"],
+            "site_origin": snapshot["site_origin"],
+            "manifest_sha256": snapshot["manifest_sha256"],
+            "selected_sha256": hashlib.sha256(snapshot["selected"].encode("utf-8")).hexdigest(),
+            "source_sha256": snapshot["source_sha256"],
+            "labels_sha256": snapshot["labels_sha256"],
+            "title_sha256": hashlib.sha256(snapshot["title"].encode("utf-8")).hexdigest(),
+            "compiler_sha256": snapshot["compiler_sha256"],
+            "server_policy_sha256": snapshot["policy_sha256"],
+            "expires_at": snapshot["expires_at"],
+        }
+        if (any(binding.get(field) != value for field, value in expected.items())
+                or binding.get("site_id") != receipt.get("site_id")):
+            raise ValueError("remote_frozen_snapshot_binding_mismatch")
+        manifest = self._verify_package(package_id)
+        if snapshot.get("compiler") != manifest.get("compiler"):
+            raise ValueError("remote_frozen_snapshot_compiler_mismatch")
+        policy = snapshot.get("policy")
+        if not isinstance(policy, dict):
+            raise ValueError("remote_frozen_snapshot_shape_invalid")
+        inventory = snapshot.get("inventory")
+        if not isinstance(inventory, dict):
+            raise ValueError("remote_frozen_snapshot_shape_invalid")
+        expected_inventory = {}
+        for relative, record in manifest["inventory"].items():
+            if relative == "preview.html":
+                continue
+            suffix = PurePosixPath(relative).suffix.lower()
+            mime = {
+                ".css": "text/css", ".png": "image/png", ".woff2": "font/woff2",
+                ".woff": "font/woff", ".ttf": "font/ttf", ".otf": "font/otf",
+            }.get(suffix)
+            if mime is None:
+                raise ValueError("package_asset_type_denied")
+            expected_inventory[relative] = {"bytes": record["bytes"], "sha256": record["sha256"], "mime": mime}
+        if inventory != expected_inventory:
+            raise ValueError("remote_frozen_snapshot_inventory_mismatch")
+        self._recheck(receipt, package_id)
+        return {
+            "operation_id": operation_id,
+            "digest": receipt["remote_digest"],
+            "state": frozen["state"],
+            "snapshot_json": snapshot_json,
+            "package_id": package_id,
+            "publication_approval": False,
+        }
+
     def commit(self, operation_id: str, digest: str) -> dict:
         self._ensure_open()
         receipt = self._read_receipt(operation_id)
@@ -812,6 +934,12 @@ class BridgeDispatcher:
         if method == "GET" and body:
             return self._json(413, {"code": "get_body_denied"})
         if method == "GET":
+            frozen_match = re.fullmatch(r"/v1/frozen/([a-f0-9]{32})", path)
+            if frozen_match:
+                try:
+                    return self._json(200, self.session.frozen_preview(frozen_match.group(1)))
+                except ValueError:
+                    return self._json(404, {"code": "frozen_snapshot_not_found"})
             status_match = re.fullmatch(r"/v1/status/([a-f0-9]{32})", path)
             if status_match:
                 try:

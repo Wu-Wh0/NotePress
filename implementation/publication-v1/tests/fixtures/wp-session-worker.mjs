@@ -58,7 +58,7 @@ function phpJson(code, label) {
   return php.run({ code }).then(response => jsonOutput(response, label));
 }
 async function wpRequest(method, route, body, actor = 'publisher') {
-  const session = actor === 'reviewer' ? identities.reviewer : actor === 'publisher' ? identities.publisher : null;
+  const session = actor === 'reviewer' ? identities.reviewer : actor === 'otherPublisher' ? identities.otherPublisher : actor === 'publisher' ? identities.publisher : null;
   const headers = { accept: 'application/json' };
   if (session) {
     headers.cookie = session.cookie;
@@ -134,9 +134,12 @@ try {
     }
     $publisher = pv1_session_create_actor('synthetic-publisher-${input.runId}', 'publish_publication_v1');
     $reviewer = pv1_session_create_actor('synthetic-reviewer-${input.runId}', 'approve_publication_v1');
-    echo json_encode(array('publisher' => $publisher, 'reviewer' => $reviewer));
+    $other_publisher = pv1_session_create_actor('synthetic-other-publisher-${input.runId}', 'publish_publication_v1');
+    echo json_encode(array('publisher' => $publisher, 'reviewer' => $reviewer, 'otherPublisher' => $other_publisher));
   `, 'synthetic actor setup');
-  if (!identities.publisher?.id || !identities.reviewer?.id || identities.publisher.id === identities.reviewer.id) throw new Error('synthetic actors are not distinct');
+  if (!identities.publisher?.id || !identities.reviewer?.id || !identities.otherPublisher?.id
+      || identities.publisher.id === identities.reviewer.id || identities.publisher.id === identities.otherPublisher.id
+      || identities.reviewer.id === identities.otherPublisher.id) throw new Error('synthetic actors are not distinct');
 
   server = http.createServer(async (req, res) => {
     try {
@@ -188,6 +191,77 @@ try {
         };
         res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
         res.end(JSON.stringify(result));
+        return;
+      }
+      if (route === '/__test__/snapshot-readback-probes' && req.method === 'POST' && control) {
+        const value = JSON.parse(body.toString('utf8'));
+        const snapshotRoute = `/wp-json/publication-v1/v1/operations/${value.id}/snapshot`;
+        const publisherResult = await wpRequest('GET', snapshotRoute, undefined, 'publisher');
+        const reviewerResult = await wpRequest('GET', snapshotRoute, undefined, 'reviewer');
+        const otherPublisherResult = await wpRequest('GET', snapshotRoute, undefined, 'otherPublisher');
+        const anonymousResult = await wpRequest('GET', snapshotRoute, undefined, 'anonymous');
+        const phpProof = await phpJson(`<?php
+          $_SERVER['DOCUMENT_ROOT'] = '${sitePath}';
+          require_once '${sitePath}/wp-load.php';
+          $found = pubv1_record_for_owner('${value.id}', ${identities.publisher.id});
+          $record = is_array($found) ? $found[1] : false;
+          $snapshot = is_array($record) ? ($record['snapshot'] ?? null) : null;
+          $rendered = is_array($snapshot) ? ($snapshot['rendered'] ?? null) : null;
+          $content = is_array($snapshot) ? ($snapshot['content'] ?? null) : null;
+          $canonical = is_array($snapshot) ? pubv1_canonical_json($snapshot) : false;
+          $unsupported_filter_output_rejected = false;
+          $decoding_scope = array();
+          if (is_string($content) && strpos($content, '<img ') !== false) {
+            preg_match('~<img[^>]*>~', $content, $png_tag);
+            $decoding_scope['pretty'] = pubv1_omit_snapshot_png_decoding_attr('async', $png_tag[0], 'the_content') === false;
+            $ordinary = apply_filters('the_content', '<p><img src="https://example.test/ordinary.png" alt="ordinary"></p>');
+            $decoding_scope['ordinary_unchanged'] = strpos($ordinary, 'decoding="async"') !== false;
+            $foreign_tag = str_replace('https://publication-v1.example.test', 'https://foreign.example.test', $png_tag[0]);
+            $decoding_scope['foreign_unchanged'] = pubv1_omit_snapshot_png_decoding_attr('async', $foreign_tag, 'the_content') === 'async';
+            $query_url = static function ($url, $path) {
+              return home_url('/?rest_route=' . rawurlencode('/' . ltrim($path, '/')));
+            };
+            add_filter('rest_url', $query_url, 10, 2);
+            try {
+              $png_path = null;
+              foreach ($snapshot['inventory'] as $path => $asset) {
+                if (pubv1_asset_mime($path) === 'image/png') { $png_path = $path; break; }
+              }
+              $query_tag = '<img src="' . htmlspecialchars(pubv1_resource_url('${value.id}', $png_path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '">';
+              $decoding_scope['query'] = pubv1_omit_snapshot_png_decoding_attr('async', $query_tag, 'the_content') === false;
+              $missing_tag = '<img src="' . htmlspecialchars(pubv1_resource_url('${value.id}', 'assets/images/' . str_repeat('0', 64) . '.png'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '">';
+              $decoding_scope['missing_inventory_unchanged'] = pubv1_omit_snapshot_png_decoding_attr('async', $missing_tag, 'the_content') === 'async';
+            } finally {
+              remove_filter('rest_url', $query_url, 10);
+            }
+            $force_async = static function ($value, $image, $context) { return 'async'; };
+            add_filter('wp_img_tag_add_decoding_attr', $force_async, 20, 3);
+            try {
+              $unsupported_filter_output_rejected = !pubv1_current($record);
+            } finally {
+              remove_filter('wp_img_tag_add_decoding_attr', $force_async, 20);
+            }
+          }
+          echo json_encode(array(
+            'rendered' => $rendered,
+            'rendered_kses_unchanged' => is_string($rendered) && wp_kses_post($rendered) === $rendered,
+            'rendered_matches_real_the_content' => is_string($rendered) && is_string($content) && apply_filters('the_content', $content) === $rendered,
+            'decoding_scope' => $decoding_scope,
+            'unsupported_filter_output_rejected' => $unsupported_filter_output_rejected,
+            'snapshot_sha256' => is_string($canonical) ? hash('sha256', $canonical) : null
+          ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        `, 'frozen snapshot rendered proof');
+        const cacheValue = publisherResult.headers?.['cache-control'] || publisherResult.headers?.['Cache-Control'] || [];
+        res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        res.end(JSON.stringify({
+          publisher_status: publisherResult.status,
+          reviewer_status: reviewerResult.status,
+          other_publisher_status: otherPublisherResult.status,
+          anonymous_status: anonymousResult.status,
+          snapshot_cache_control: Array.isArray(cacheValue) ? cacheValue.join(', ') : String(cacheValue),
+          snapshot_json: publisherResult.status === 200 ? JSON.parse(publisherResult.text).snapshot_json : null,
+          ...phpProof,
+        }));
         return;
       }
       if (route === '/__test__/public-readback' && req.method === 'POST' && control) {

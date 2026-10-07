@@ -55,7 +55,7 @@ function pubv1_pending_callback($request) {
     if (!$snapshot) {
         return pubv1_error('package_or_policy_invalid', 409);
     }
-    $digest = pubv1_digest($snapshot);
+    $digest = pubv1_snapshot_digest($snapshot);
     if (!is_string($digest)) {
         return pubv1_error('snapshot_digest_failed', 503);
     }
@@ -206,6 +206,47 @@ function pubv1_operation_lookup_callback($request) {
         'post_id' => isset($record['post_id']) ? (int) $record['post_id'] : null,
         'binding' => $binding,
     ), 200, array('Cache-Control' => 'no-store'));
+}
+
+function pubv1_operation_snapshot_callback($request) {
+    $operation_id = $request['id'];
+    $publisher_id = (int) get_current_user_id();
+    $found = pubv1_record_for_owner($operation_id, $publisher_id);
+    if (!$found) {
+        return pubv1_error('operation_not_found', 404);
+    }
+    $record = $found[1];
+    $snapshot = $record['snapshot'] ?? null;
+    $site_id = (int) get_current_blog_id();
+    if (!is_array($snapshot)
+        || !in_array($record['state'] ?? '', array('pending', 'approved'), true)
+        || !is_int($snapshot['publisher_id'] ?? null) || $snapshot['publisher_id'] !== $publisher_id
+        || !is_int($snapshot['expires_at'] ?? null) || $snapshot['expires_at'] <= time()
+        || $site_id < 1
+        || !pubv1_package_owned_by($snapshot['manifest_sha256'] ?? null, $publisher_id, $site_id)
+        || !pubv1_current($record)) {
+        return pubv1_error('operation_snapshot_unavailable', 409);
+    }
+    $rendered = $snapshot['rendered'] ?? null;
+    if (!is_string($rendered) || wp_kses_post($rendered) !== $rendered) {
+        return pubv1_error('operation_snapshot_rendering_unsupported', 409);
+    }
+    $snapshot_json = pubv1_canonical_json($snapshot);
+    $digest = $record['digest'] ?? null;
+    if (!is_string($snapshot_json) || strlen($snapshot_json) > 1048576
+        || !is_string($digest) || !pubv1_hex($digest)
+        || !hash_equals($digest, hash('sha256', $snapshot_json))) {
+        return pubv1_error('operation_snapshot_digest_unavailable', 409);
+    }
+    return new WP_REST_Response(array(
+        'id' => $operation_id,
+        'digest' => $digest,
+        'state' => $record['state'],
+        'snapshot_json' => $snapshot_json,
+    ), 200, array(
+        'Cache-Control' => 'private, no-store',
+        'X-Content-Type-Options' => 'nosniff',
+    ));
 }
 
 function pubv1_approve_callback($request) {
@@ -395,6 +436,11 @@ add_action('rest_api_init', function () {
         'methods' => WP_REST_Server::READABLE,
         'permission_callback' => 'pubv1_publisher_permission',
         'callback' => 'pubv1_operation_lookup_callback',
+    ));
+    register_rest_route('publication-v1/v1', '/operations/(?P<id>[a-f0-9]{32})/snapshot', array(
+        'methods' => WP_REST_Server::READABLE,
+        'permission_callback' => 'pubv1_publisher_permission',
+        'callback' => 'pubv1_operation_snapshot_callback',
     ));
     register_rest_route('publication-v1/v1', '/approve', array(
         'methods' => WP_REST_Server::CREATABLE,

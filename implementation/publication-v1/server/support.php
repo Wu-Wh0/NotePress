@@ -95,6 +95,11 @@ function pubv1_digest($value) {
     return is_string($json) ? hash('sha256', $json) : false;
 }
 
+function pubv1_snapshot_digest($snapshot) {
+    $json = pubv1_canonical_json($snapshot);
+    return is_string($json) ? hash('sha256', $json) : false;
+}
+
 function pubv1_path_inside($path, $parent) {
     $path = rtrim(wp_normalize_path($path), '/');
     $parent = rtrim(wp_normalize_path($parent), '/');
@@ -431,6 +436,45 @@ function pubv1_content_for_operation($operation_id, $body, $inventory) {
     return $valid && is_string($content) ? $content : false;
 }
 
+function pubv1_omit_snapshot_png_decoding_attr($value, $image, $context) {
+    if (!is_string($image) || !preg_match('~(?:^|[[:space:]])src="([^"]*)"~i', $image, $source)) {
+        return $value;
+    }
+    $url = html_entity_decode($source[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $parts = wp_parse_url($url);
+    if (!is_array($parts)) {
+        return $value;
+    }
+    $route = $parts['path'] ?? '';
+    if (isset($parts['query'])) {
+        parse_str($parts['query'], $query);
+        if (isset($query['rest_route']) && is_string($query['rest_route'])) {
+            $route = $query['rest_route'];
+        }
+    }
+    if (!preg_match('~(?:^|/)publication-v1/v1/resources/([a-f0-9]{32})/(assets/images/[a-f0-9]{64}[.]png)$~D', $route, $match)) {
+        return $value;
+    }
+    $operation_id = $match[1];
+    $path = $match[2];
+    $expected = htmlspecialchars(pubv1_resource_url($operation_id, $path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    if (!hash_equals($expected, $source[1])) {
+        return $value;
+    }
+    $raw = pubv1_read_raw_option(pubv1_option_key($operation_id));
+    $record = $raw === null ? false : maybe_unserialize($raw);
+    $snapshot = is_array($record) ? ($record['snapshot'] ?? null) : null;
+    $asset = is_array($snapshot) ? ($snapshot['inventory'][$path] ?? null) : null;
+    if (!is_array($snapshot) || ($snapshot['operation_key'] ?? null) !== $operation_id
+        || !is_array($asset) || pubv1_asset_mime($path) !== 'image/png'
+        || !hash_equals(substr(basename($path), 0, 64), $asset['sha256'] ?? '')) {
+        return $value;
+    }
+    return false;
+}
+
+add_filter('wp_img_tag_add_decoding_attr', 'pubv1_omit_snapshot_png_decoding_attr', 10, 3);
+
 function pubv1_freeze($operation_id, $manifest_sha256, $title, $publisher_id, $expires_at) {
     $manifest = pubv1_load_package($manifest_sha256);
     $policy = pubv1_policy();
@@ -451,7 +495,27 @@ function pubv1_freeze($operation_id, $manifest_sha256, $title, $publisher_id, $e
         $asset['mime'] = pubv1_asset_mime($path);
         $inventory[$path] = $asset;
     }
-    $rendered = apply_filters('the_content', $content);
+    $publication_png_sources = array();
+    foreach ($manifest['inventory'] as $path => $asset) {
+        if (preg_match('~^assets/images/([a-f0-9]{64})[.]png$~D', $path, $image_hash)
+            && is_array($asset) && is_string($asset['sha256'] ?? null)
+            && hash_equals($image_hash[1], $asset['sha256'])) {
+            $publication_png_sources[] = htmlspecialchars(pubv1_resource_url($operation_id, $path), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        }
+    }
+    $omit_publication_png_decoding = static function ($value, $image, $context) use ($publication_png_sources) {
+        if (is_string($image) && preg_match('~(?:^|[[:space:]])src="([^"]*)"~i', $image, $source)
+            && in_array($source[1], $publication_png_sources, true)) {
+            return false;
+        }
+        return $value;
+    };
+    add_filter('wp_img_tag_add_decoding_attr', $omit_publication_png_decoding, 10, 3);
+    try {
+        $rendered = apply_filters('the_content', $content);
+    } finally {
+        remove_filter('wp_img_tag_add_decoding_attr', $omit_publication_png_decoding, 10);
+    }
     if (!is_string($rendered)) {
         return false;
     }
@@ -483,12 +547,12 @@ function pubv1_current($record) {
     if (!is_array($record) || !is_array($record['snapshot'] ?? null) || !pubv1_hex($record['digest'] ?? null)) {
         return false;
     }
-    if (!hash_equals($record['digest'], (string) pubv1_digest($record['snapshot']))) {
+    if (!hash_equals($record['digest'], (string) pubv1_snapshot_digest($record['snapshot']))) {
         return false;
     }
     $s = $record['snapshot'];
     $now = pubv1_freeze($s['operation_key'] ?? '', $s['manifest_sha256'] ?? '', $s['title'] ?? '', $s['publisher_id'] ?? 0, $s['expires_at'] ?? 0);
-    return is_array($now) && hash_equals($record['digest'], (string) pubv1_digest($now));
+    return is_array($now) && hash_equals($record['digest'], (string) pubv1_snapshot_digest($now));
 }
 
 function pubv1_option_key($operation_id) {
