@@ -7,6 +7,7 @@ const MAX_LABEL_BYTES = 16000;
 const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
 const MAX_ASSET_BYTES = 4 * 1024 * 1024;
 const MAX_ASSET_TOTAL = 48 * 1024 * 1024;
+const MAX_CANDIDATE_RESPONSE_BYTES = 2048;
 const HEX64 = /^[a-f0-9]{64}$/;
 const IMAGE_PATH = /^assets\/images\/([a-f0-9]{64})\.png$/;
 const FONT_PATH = /^assets\/fonts\/KaTeX_[A-Za-z0-9_-]+\.(?:woff2|woff|ttf)$/;
@@ -118,7 +119,12 @@ function request(session, method, route, body, limit, expectedStatus) {
           if (settled) return;
           const bytes = Buffer.concat(chunks);
           if (response.statusCode !== expectedStatus) {
-            fail(new Error('bridge_rejected'));
+            let code = 'bridge_rejected';
+            try {
+              const failure = JSON.parse(bytes.toString('utf8'));
+              if (typeof failure?.code === 'string' && /^[a-z0-9_]{1,96}$/i.test(failure.code)) code = failure.code;
+            } catch {}
+            fail(new Error(code));
             return;
           }
           settled = true;
@@ -134,6 +140,22 @@ function request(session, method, route, body, limit, expectedStatus) {
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+async function inspectAssetCandidate(session, path) {
+  if (!safeAssetPath(path)) throw new Error('invalid_asset_path');
+  const response = await request(session, 'POST', '/v1/asset-candidate', { path }, MAX_CANDIDATE_RESPONSE_BYTES, 200);
+  if (response.contentType.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+    throw new Error('asset_candidate_response_invalid');
+  }
+  let result;
+  try { result = JSON.parse(response.bytes.toString('utf8')); }
+  catch { throw new Error('asset_candidate_response_invalid'); }
+  if (!exactKeys(result, ['bytes', 'mime', 'path', 'sha256']) || result.path !== path
+    || result.mime !== 'image/png' || !Number.isSafeInteger(result.bytes)
+    || result.bytes < 1 || result.bytes > MAX_ASSET_BYTES || typeof result.sha256 !== 'string'
+    || !HEX64.test(result.sha256)) throw new Error('asset_candidate_response_invalid');
+  return Object.freeze({ path: result.path, sha256: result.sha256, mime: result.mime, bytes: result.bytes });
 }
 
 function sha256(data) {
@@ -349,4 +371,4 @@ async function renderLiveSession(session, selected, browserWindow) {
   }
 }
 
-module.exports = { normalizePublicationSession, renderLiveSession };
+module.exports = { normalizePublicationSession, inspectAssetCandidate, renderLiveSession, safeAssetPath };

@@ -1,6 +1,7 @@
 """Strict synthetic tests for the bounded publication-v1 session core."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -145,6 +146,59 @@ class BridgeSessionTests(unittest.TestCase):
         self.assertRegex(result["package_id"], r"^[0-9a-f]{64}$")
         self.assertIn("<h1>Synthetic</h1>", result["html"])
         self.assertIn("assets/images/", result["html"])
+        self.assertEqual(self.transport.calls, [])
+        self.assertEqual(list(self.receipts.glob("*.json")) if self.receipts.exists() else [], [])
+
+    def test_authenticated_asset_candidate_admits_only_hash_bound_live_png_resource(self):
+        dispatcher = BridgeDispatcher(self.session, pinned_host=HOST)
+        authorization = dispatcher.take_startup_authorization()
+        headers = {
+            "Origin": ORIGIN, "Host": HOST, "Authorization": authorization,
+            "Content-Type": "application/json",
+        }
+        body = json.dumps({"path": "pixel.png"}, separators=(",", ":")).encode()
+
+        status, _response_headers, _response = dispatcher.dispatch(
+            "POST", "/v1/asset-candidate", {key: value for key, value in headers.items() if key != "Authorization"}, body
+        )
+        self.assertEqual(status, 401)
+        status, _response_headers, response = dispatcher.dispatch(
+            "POST", "/v1/asset-candidate", headers, body
+        )
+        self.assertEqual(status, 200)
+        candidate = json.loads(response)
+        self.assertEqual(candidate, {
+            "path": "pixel.png", "sha256": hashlib.sha256(self.image).hexdigest(),
+            "mime": "image/png", "bytes": len(self.image),
+        })
+
+        live_body = json.dumps({
+            "path": "notes/selected.md", "text": self.source.decode("utf-8"),
+            "source_sha256": hashlib.sha256(self.source).hexdigest(), "title": "Independent title",
+            "approved_assets": {"pixel.png": {"sha256": candidate["sha256"], "mime": candidate["mime"]}},
+            "approved_labels": {},
+        }, separators=(",", ":")).encode()
+        status, _response_headers, response = dispatcher.dispatch("POST", "/v1/live", headers, live_body)
+        self.assertEqual(status, 200)
+        rendered = json.loads(response)
+        self.assertIn("<title>Independent title</title>", rendered["html"])
+        self.assertIn("<h1>Synthetic</h1>", rendered["html"])
+        asset_path = f"/v1/assets/{rendered['package_id']}"
+        status, _response_headers, _response = dispatcher.dispatch(
+            "GET", asset_path, {"Origin": ORIGIN, "Host": HOST}
+        )
+        self.assertEqual(status, 401)
+        status, _response_headers, response = dispatcher.dispatch("GET", asset_path, headers)
+        self.assertEqual(status, 200)
+        resources = json.loads(response)["assets"]
+        image_record = resources[f"assets/images/{candidate['sha256']}.png"]
+        self.assertEqual(image_record["content_type"], "image/png")
+        self.assertEqual(base64.b64decode(image_record["data"]), self.image)
+
+        (self.note.parent / "pixel.png").write_bytes(png_fixture() + b"changed")
+        status, _response_headers, response = dispatcher.dispatch("POST", "/v1/live", headers, live_body)
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(response)["code"], "asset_approval_hash_mismatch")
         self.assertEqual(self.transport.calls, [])
         self.assertEqual(list(self.receipts.glob("*.json")) if self.receipts.exists() else [], [])
 

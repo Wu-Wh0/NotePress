@@ -34,7 +34,7 @@ NODE_DRIVER = r'''const Module = require('node:module');
 const originalLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (request === 'obsidian') return {
-    Plugin: class Plugin {}, Notice: class Notice {}, ItemView: class ItemView {},
+    Plugin: class Plugin {}, Notice: class Notice {}, ItemView: class ItemView {}, Modal: class Modal {},
   };
   return originalLoad.call(this, request, parent, isMain);
 };
@@ -229,6 +229,7 @@ class PluginLiveSessionTests(unittest.TestCase):
             for request in live_requests:
                 self.assertTrue(request["authorized"])
                 self.assertEqual(request["origin"], ORIGIN)
+                self.assertEqual(request["body"]["title"], "Explicit Live Title")
                 self.assertEqual(request["body"]["approved_assets"], {})
                 self.assertEqual(request["body"]["approved_labels"], {})
                 self.assertNotIn("authorization", request["body"])
