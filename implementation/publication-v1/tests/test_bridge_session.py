@@ -265,6 +265,37 @@ class BridgeSessionTests(unittest.TestCase):
         self.assertEqual([call[0] for call in self.transport.calls], ["upload", "prepare", "lookup"])
         self.assertEqual({call[1] for call in self.transport.calls}, {operation_id})
 
+    def test_bounded_recovery_discovers_only_one_matching_prepare_and_never_reposts(self):
+        self.transport.fail_prepare = True
+        with self.assertRaisesRegex(ValueError, "server_outcome_unknown"):
+            self.session.prepare("Synthetic title", self.approved_assets)
+        initial = next(json.loads(path.read_bytes()) for path in self.receipts.glob("*.json"))
+        operation_id = initial["operation_id"]
+        dispatcher = BridgeDispatcher(self.session, pinned_host=HOST)
+        authorization = dispatcher.take_startup_authorization()
+        headers = {
+            "Origin": ORIGIN, "Host": HOST, "Authorization": authorization,
+            "Content-Type": "application/json",
+        }
+        body = json.dumps({"title": "Synthetic title", "approved_assets": self.approved_assets}, separators=(",", ":")).encode()
+        status, _headers, response = dispatcher.dispatch("POST", "/v1/recover", headers, body)
+        self.assertEqual(status, 200, response)
+        recovered = json.loads(response)
+        self.assertEqual(set(recovered), {"operation_id", "state", "digest", "package_id", "source_sha256", "labels_sha256", "title_sha256", "publication_approval"})
+        self.assertEqual(recovered["operation_id"], operation_id)
+        self.assertEqual(recovered["state"], "pending")
+        self.assertEqual(recovered["digest"], DIGEST)
+        self.assertIs(recovered["publication_approval"], False)
+        self.assertEqual([call[0] for call in self.transport.calls], ["upload", "prepare", "lookup"])
+
+        duplicate = dict(initial)
+        duplicate["operation_id"] = "f" * 32
+        (self.receipts / (duplicate["operation_id"] + ".json")).write_text(json.dumps(duplicate), encoding="utf-8")
+        ambiguous_status, _headers, ambiguous_body = dispatcher.dispatch("POST", "/v1/recover", headers, body)
+        self.assertEqual(ambiguous_status, 409)
+        self.assertEqual(json.loads(ambiguous_body)["code"], "receipt_discovery_ambiguous")
+        self.assertEqual([call[0] for call in self.transport.calls], ["upload", "prepare", "lookup"])
+
     def test_unknown_prepare_readback_rejects_digest_only_and_mismatched_bindings(self):
         self.transport.fail_prepare = True
         with self.assertRaisesRegex(ValueError, "server_outcome_unknown"):

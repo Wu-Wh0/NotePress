@@ -70,6 +70,42 @@ def assert_port_closed(port: int) -> None:
             raise AssertionError(f"owned loopback port {port} remained open")
 
 
+NODE_SESSION_CLIENT = r"""
+const client = require(process.argv[1]);
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', async () => {
+  let rendered;
+  try {
+    const value = JSON.parse(input);
+    const session = { origin: value.origin, authorization: value.authorization,
+      selected: value.selected.path, title: value.title, approvedAssets: value.approvedAssets,
+      approvedLabels: {}, workflowConnected: true, sitePin: value.sitePin };
+    const receipt = await client.discoverPublicationReceipt(session, value.selected);
+    const status = await client.publicationStatus(session, receipt.operation_id);
+    const browserWindow = { Blob: class Blob { constructor(parts, options) { this.parts = parts; this.type = options.type; } },
+      URL: { createObjectURL: (() => { let n = 0; return () => `blob:session-test-${++n}`; })(), revokeObjectURL() {} } };
+    rendered = await client.renderFrozenSession(session, value.selected, receipt, browserWindow);
+    process.stdout.write(JSON.stringify({
+      operation_id: receipt.operation_id, receipt_state: receipt.state, remote_state: status.remote.state,
+      digest: rendered.digest, package_id: rendered.package_id,
+      rendered_sha256: require('node:crypto').createHash('sha256').update(rendered.rendered).digest('hex'),
+      srcdoc_has_csp: rendered.srcdoc.includes('Content-Security-Policy'),
+      srcdoc_has_loopback_resource_url: rendered.srcdoc.includes('/resources/'),
+      srcdoc_has_no_anchor_href: !/<a\b[^>]*\bhref\s*=/.test(rendered.srcdoc),
+      srcdoc_preserves_inert_link_markup: /<a\b[^>]*>普通链接<\/a>/.test(rendered.srcdoc),
+      srcdoc_has_math_markup: rendered.srcdoc.includes('class="katex"') && rendered.srcdoc.includes('<math'),
+      publication_approval: rendered.publication_approval,
+    }));
+  } catch (error) {
+    process.stderr.write(`node_session_client_failed:${error.message}`);
+    process.exitCode = 1;
+  } finally { rendered?.dispose?.(); }
+});
+"""
+
+
 class SessionWordPressIntegrationTests(unittest.TestCase):
     def test_authenticated_listener_private_wordpress_lifecycle_and_readback(self):
         self.assertTrue(NODE.is_file(), f"pinned Node runtime missing: {NODE}")
@@ -80,7 +116,7 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
             vault = root / "synthetic-vault"
             note = vault / selected
             note.parent.mkdir(parents=True)
-            source = "# 合成闭环\n\n真实 producer、批准 PNG 与 [普通链接](https://example.test/path)。\n\n![像素](图.png)\n"
+            source = "# 合成闭环\n\n真实 producer、批准 PNG 与 [普通链接](https://example.test/path)。\n\n![像素](图.png)\n\n公式 $a^2+b^2=c^2$。\n\n$$\n\\frac{1}{2}\n$$\n"
             note.write_text(source, encoding="utf-8")
             image = png_fixture()
             (note.parent / "图.png").write_bytes(image)
@@ -289,6 +325,35 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                 self.assertEqual(frozen_png["operation_id"], operation_id)
                 self.assertEqual(json.loads(frozen_png["snapshot_json"])["rendered"], proof["rendered"])
                 self.assertIs(frozen_png["publication_approval"], False)
+                node_input = {
+                    "origin": bridge.url,
+                    "authorization": authorization,
+                    "selected": {"path": selected, "source_sha256": receipt["source_sha256"]},
+                    "title": "真实 WP 会话接线",
+                    "approvedAssets": approvals,
+                    "sitePin": SITE,
+                }
+                node_result = subprocess.run(
+                    [str(NODE), "-e", NODE_SESSION_CLIENT, str(ROOT / "plugin" / "session_client.js")],
+                    input=json.dumps(node_input, ensure_ascii=False),
+                    text=True, capture_output=True, timeout=60, check=False,
+                )
+                self.assertEqual(node_result.returncode, 0, node_result.stderr)
+                node_session_client = json.loads(node_result.stdout)
+                self.assertEqual(node_session_client["operation_id"], unknown_operation_id)
+                self.assertEqual(node_session_client["receipt_state"], "pending")
+                self.assertEqual(node_session_client["remote_state"], "pending")
+                self.assertEqual(node_session_client["digest"], digest)
+                self.assertEqual(node_session_client["package_id"], manifest_sha)
+                self.assertEqual(node_session_client["rendered_sha256"], hashlib.sha256(proof["rendered"].encode("utf-8")).hexdigest())
+                self.assertTrue(node_session_client["srcdoc_has_csp"])
+                self.assertFalse(node_session_client["srcdoc_has_loopback_resource_url"])
+                self.assertTrue(node_session_client["srcdoc_has_no_anchor_href"])
+                self.assertTrue(node_session_client["srcdoc_preserves_inert_link_markup"])
+                self.assertTrue(node_session_client["srcdoc_has_math_markup"])
+                self.assertIs(node_session_client["publication_approval"], False)
+                self.assertEqual(operation_post_ids.count(unknown_operation_id), 1)
+                self.assertEqual(len(operation_post_ids), 1)
                 self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/commit"), 0), 0)
                 self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/operations"), 0), 1)
 
@@ -338,6 +403,10 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                 self.assertEqual(safe_frozen["package_id"], safe_receipt["manifest_sha256"])
                 self.assertIs(safe_frozen["publication_approval"], False)
                 self.assertEqual(safe_response_headers["Cache-Control"], "no-store")
+                no_auth_asset_status, _headers, _body = http_exchange(
+                    safe_bridge_port, "GET", f"{safe_path}/assets", headers={"Origin": ORIGIN}
+                )
+                self.assertEqual(no_auth_asset_status, 401)
                 safe_raw = safe_frozen["snapshot_json"].encode("utf-8")
                 self.assertEqual(hashlib.sha256(safe_raw).hexdigest(), safe_frozen["digest"])
                 safe_snapshot = json.loads(safe_raw)
@@ -470,6 +539,7 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                 self.assertEqual(len(operation_post_ids), 2)
 
                 print("SESSION_WORDPRESS_EVIDENCE=" + json.dumps({
+                    "node_session_client_frozen_readback": node_session_client,
                     "run_id": run_id,
                     "worker_pid": worker.pid,
                     "private_upload_http_statuses": [row[0] for row in remote_responses["uploads"]],

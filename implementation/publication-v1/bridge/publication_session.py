@@ -652,6 +652,77 @@ class BridgeSession:
             remote = {"operation_id": operation_id, "state": "unknown", "digest": None}
         return {"receipt": dict(receipt), "remote": remote}
 
+    def discover_receipt(self, title: str, approved_assets: dict) -> dict:
+        """Find one exact prepare receipt; only reconcile locally, never write to WP."""
+        self._ensure_open()
+        title = self._title(title)
+        approved = self._approvals(approved_assets)
+        binding = self._capture_binding(approved)
+        title_sha256 = hashlib.sha256(title.encode("utf-8")).hexdigest()
+        matches = []
+        for path in self._receipt_files():
+            receipt = self._read_receipt(path.stem)
+            if (receipt.get("selected_path") != self.selected
+                    or receipt.get("site_pin") != self.site_pin
+                    or receipt.get("policy_sha256") != self.policy_sha256
+                    or receipt.get("title_sha256") != title_sha256
+                    or receipt.get("source_sha256") != binding["source_sha256"]
+                    or receipt.get("labels_sha256") != binding["labels_sha256"]
+                    or receipt.get("image_sha256") != binding["image_sha256"]
+                    or receipt.get("state") not in {"pending", "unknown"}
+                    or (receipt.get("state") == "unknown" and receipt.get("phase") != "prepare")):
+                continue
+            self._recheck(receipt, receipt.get("manifest_sha256"))
+            matches.append(receipt)
+        if not matches:
+            raise ValueError("receipt_not_found")
+        if len(matches) != 1:
+            raise ValueError("receipt_discovery_ambiguous")
+        receipt = matches[0]
+        status = self.status(receipt["operation_id"])
+        remote = status["remote"]
+        current = status["receipt"]
+        if (remote.get("state") not in {"pending", "approved"}
+                or not isinstance(remote.get("digest"), str)
+                or current.get("state") != "pending"
+                or current.get("remote_digest") != remote["digest"]):
+            raise ValueError("receipt_not_reconcilable")
+        return {
+            "operation_id": current["operation_id"],
+            "state": remote["state"],
+            "digest": remote["digest"],
+            "package_id": current["manifest_sha256"],
+            "source_sha256": current["source_sha256"],
+            "labels_sha256": current["labels_sha256"],
+            "title_sha256": current["title_sha256"],
+            "publication_approval": False,
+        }
+
+    def frozen_asset_bundle(self, operation_id: str) -> dict:
+        """Read only inventory-verified assets for this current frozen receipt."""
+        self._ensure_open()
+        frozen = self.frozen_preview(operation_id)
+        snapshot = json.loads(frozen["snapshot_json"])
+        resources = {}
+        total = 0
+        for relative, record in sorted(snapshot["inventory"].items()):
+            if not relative.startswith("assets/"):
+                raise ValueError("package_asset_type_denied")
+            content, content_type = self.read_asset(frozen["package_id"], relative)
+            total += len(content)
+            if (total > MAX_PACKAGE_BYTES or len(content) != record["bytes"]
+                    or hashlib.sha256(content).hexdigest() != record["sha256"]):
+                raise ValueError("package_resource_binding_mismatch")
+            resources[relative] = {
+                "bytes": len(content), "sha256": record["sha256"],
+                "content_type": content_type.split(";", 1)[0],
+                "data": base64.b64encode(content).decode("ascii"),
+            }
+        return {
+            "operation_id": operation_id, "digest": frozen["digest"],
+            "package_id": frozen["package_id"], "assets": resources,
+        }
+
     def frozen_preview(self, operation_id: str) -> dict:
         """Return the exact current WordPress-frozen bytes for this saved source."""
         self._ensure_open()
@@ -832,6 +903,7 @@ class BridgeSession:
             ".woff2": "font/woff2",
             ".woff": "font/woff",
             ".ttf": "font/ttf",
+            ".otf": "font/otf",
         }.get(suffix)
         if content_type is None:
             raise ValueError("package_asset_type_denied")
@@ -940,6 +1012,12 @@ class BridgeDispatcher:
                     return self._json(200, self.session.frozen_preview(frozen_match.group(1)))
                 except ValueError:
                     return self._json(404, {"code": "frozen_snapshot_not_found"})
+            frozen_assets_match = re.fullmatch(r"/v1/frozen/([a-f0-9]{32})/assets", path)
+            if frozen_assets_match:
+                try:
+                    return self._json(200, self.session.frozen_asset_bundle(frozen_assets_match.group(1)))
+                except ValueError:
+                    return self._json(404, {"code": "frozen_assets_not_found"})
             status_match = re.fullmatch(r"/v1/status/([a-f0-9]{32})", path)
             if status_match:
                 try:
@@ -980,6 +1058,10 @@ class BridgeDispatcher:
                 if set(request) != {"title", "approved_assets"}:
                     raise ValueError("request_fields_invalid")
                 return self._json(201, self.session.prepare(request["title"], request["approved_assets"]))
+            if path == "/v1/recover":
+                if set(request) != {"title", "approved_assets"}:
+                    raise ValueError("request_fields_invalid")
+                return self._json(200, self.session.discover_receipt(request["title"], request["approved_assets"]))
             if path == "/v1/cancel":
                 if request:
                     raise ValueError("request_fields_invalid")
