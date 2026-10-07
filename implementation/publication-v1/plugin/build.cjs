@@ -25,6 +25,11 @@ function build(output){
  new (require('node:vm').Script)(bundle,{filename:'blog-entry-preview/main.js'});
  const manifest=fs.readFileSync(path.join(__dirname,'manifest.json'));
  fs.mkdirSync(target,{recursive:true});
+ if(fs.realpathSync(target)===fs.realpathSync(__dirname))throw new Error('refuse_source_directory_output');
+ for(const name of ['main.js','manifest.json']){
+  const info=fs.lstatSync(path.join(target,name),{throwIfNoEntry:false});
+  if(info&&(!info.isFile()||info.isSymbolicLink()||info.nlink!==1))throw new Error('unsafe_existing_output_file');
+ }
  fs.writeFileSync(path.join(target,'main.js'),bundle);
  fs.writeFileSync(path.join(target,'manifest.json'),manifest);
  return {source_sha256:inventory,bundle_sha256:crypto.createHash('sha256').update(bundle).digest('hex')};
