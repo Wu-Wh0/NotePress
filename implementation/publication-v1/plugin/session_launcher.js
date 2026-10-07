@@ -1,6 +1,7 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
+const net = require('node:net');
 
 const MAX_HANDSHAKE_BYTES = 4096;
 const STARTUP_TIMEOUT_MS = 10000;
@@ -55,6 +56,71 @@ function mappedVaultPath(launch, actualVault, expectedVault) {
   return mapping.wslVault;
 }
 
+function windowsWslLauncher(config) {
+  const basename = config.command.replaceAll('\\', '/').split('/').at(-1).toLowerCase();
+  return process.platform === 'win32' && basename === 'wsl.exe';
+}
+
+function wslExecArgs(config) {
+  if (!windowsWslLauncher(config)) return config.args;
+  const execIndexes = config.args.flatMap((arg, index) => arg === '--exec' ? [index] : []);
+  if (execIndexes.length !== 1) throw new Error('bridge_launch_invalid');
+  const execIndex = execIndexes[0];
+  const linuxCommand = config.args[execIndex + 1];
+  if (typeof linuxCommand !== 'string' || !linuxCommand.startsWith('/') || linuxCommand.startsWith('//')) {
+    throw new Error('bridge_launch_invalid');
+  }
+  const assignments = Object.entries(config.env)
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([key, value]) => `${key}=${value}`);
+  return [
+    ...config.args.slice(0, execIndex + 1),
+    '/usr/bin/env',
+    ...assignments,
+    ...config.args.slice(execIndex + 1),
+  ];
+}
+
+function waitForLoopback(origin) {
+  const url = new URL(origin);
+  let settled = false;
+  let timer;
+  let socket;
+  let cancel;
+  const promise = new Promise((resolve, reject) => {
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket?.destroy(); } catch {}
+      if (error) reject(error);
+      else resolve();
+    };
+    cancel = () => finish(new Error('local_session_start_failed'));
+    const attempt = () => {
+      if (settled) return;
+      const current = net.createConnection({ host: url.hostname, port: Number(url.port) });
+      socket = current;
+      let attemptSettled = false;
+      const retry = () => {
+        if (attemptSettled || settled) return;
+        attemptSettled = true;
+        current.destroy();
+        timer = setTimeout(attempt, 50);
+      };
+      current.once('connect', () => {
+        if (attemptSettled || settled) { current.destroy(); return; }
+        attemptSettled = true;
+        finish();
+      });
+      current.once('error', retry);
+      current.setTimeout(1000, retry);
+    };
+    attempt();
+  });
+  return { promise, cancel: () => cancel?.() };
+}
+
 function parseHandshake(line) {
   let value;
   try { value = JSON.parse(line.toString('utf8')); } catch { throw new Error('local_session_start_failed'); }
@@ -80,7 +146,7 @@ function spawnLocalLauncher(launch, runtimeConfig) {
   if (Buffer.byteLength(payload, 'utf8') > 8192) throw new Error('local_session_start_failed');
   let child;
   try {
-    child = spawn(config.command, config.args, {
+    child = spawn(config.command, wslExecArgs(config), {
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: config.env,
@@ -98,11 +164,13 @@ function spawnLocalLauncher(launch, runtimeConfig) {
   let rejectReady;
   const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   let settled = false;
+  let cancelReadiness = () => {};
   let output = Buffer.alloc(0);
   const fail = () => {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
+    cancelReadiness();
     rejectReady(new Error('local_session_start_failed'));
   };
   const timer = setTimeout(fail, STARTUP_TIMEOUT_MS);
@@ -126,6 +194,17 @@ function spawnLocalLauncher(launch, runtimeConfig) {
       const session = parseHandshake(output.subarray(0, newline));
       output.fill(0);
       output = Buffer.alloc(0);
+      if (windowsWslLauncher(config)) {
+        const readiness = waitForLoopback(session.origin);
+        cancelReadiness = readiness.cancel;
+        readiness.promise.then(() => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolveReady(session);
+        }, fail);
+        return;
+      }
       settled = true;
       clearTimeout(timer);
       resolveReady(session);
