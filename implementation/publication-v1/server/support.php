@@ -461,7 +461,8 @@ function pubv1_omit_snapshot_png_decoding_attr($value, $image, $context) {
     if (!hash_equals($expected, $source[1])) {
         return $value;
     }
-    $record = get_option(pubv1_option_key($operation_id));
+    $raw = pubv1_read_raw_option(pubv1_option_key($operation_id));
+    $record = $raw === null ? false : maybe_unserialize($raw);
     $snapshot = is_array($record) ? ($record['snapshot'] ?? null) : null;
     $asset = is_array($snapshot) ? ($snapshot['inventory'][$path] ?? null) : null;
     if (!is_array($snapshot) || ($snapshot['operation_key'] ?? null) !== $operation_id

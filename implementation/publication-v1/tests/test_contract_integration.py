@@ -136,6 +136,7 @@ class ProducerServerContractTests(unittest.TestCase):
                 function wp_json_encode($value, $flags = 0) { return json_encode($value, $flags); }
                 function add_action(...$args) {}
                 function add_filter(...$args) {}
+                function remove_filter(...$args) {}
                 function get_bloginfo($key) { return 'synthetic-wp'; }
                 function home_url($path = '/') { return 'https://example.test' . $path; }
                 function rest_url($path = '') { return 'https://example.test/wp-json/' . ltrim($path, '/'); }
