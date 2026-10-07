@@ -18,7 +18,15 @@ COMMIT_ROUTE = "/wp-json/publication-v1/v1/commit"
 MAX_MANIFEST_BYTES = 65_536
 MAX_PACKAGE_BYTES = 16_000_000
 MAX_UPLOAD_BODY_BYTES = 25_165_824
+MAX_FROZEN_SNAPSHOT_BYTES = 1_048_576
+MAX_FROZEN_RESPONSE_BYTES = 4_194_304
 MAX_FILES = 128
+FROZEN_SNAPSHOT_FIELDS = {
+    "schema", "operation_key", "selected", "source_sha256", "labels_sha256", "title",
+    "publisher_id", "site_origin", "visibility", "target_id", "baseline_sha256",
+    "manifest_sha256", "compiler", "compiler_sha256", "inventory", "content", "rendered",
+    "policy", "policy_sha256", "expires_at",
+}
 MIME_BY_SUFFIX = {
     ".html": "text/html",
     ".css": "text/css",
@@ -303,6 +311,121 @@ class WordPressTransport:
             "digest": digest,
             "binding": dict(binding),
         }
+
+    @staticmethod
+    def _frozen_snapshot_shape(snapshot: dict) -> None:
+        if not isinstance(snapshot, dict) or set(snapshot) != FROZEN_SNAPSHOT_FIELDS:
+            raise ValueError("wordpress_snapshot_shape_invalid")
+        if snapshot.get("schema") != "publication-v1":
+            raise ValueError("wordpress_snapshot_shape_invalid")
+        for field in ("operation_key",):
+            if not isinstance(snapshot.get(field), str) or not HEX32.fullmatch(snapshot[field]):
+                raise ValueError("wordpress_snapshot_shape_invalid")
+        for field in ("source_sha256", "labels_sha256", "baseline_sha256", "manifest_sha256", "compiler_sha256", "policy_sha256"):
+            if not isinstance(snapshot.get(field), str) or not HEX64.fullmatch(snapshot[field]):
+                raise ValueError("wordpress_snapshot_shape_invalid")
+        for field, limit in (("selected", 4096), ("title", 800), ("site_origin", 256)):
+            value = snapshot.get(field)
+            if not isinstance(value, str) or not value or len(value.encode("utf-8")) > limit:
+                raise ValueError("wordpress_snapshot_shape_invalid")
+        for field in ("content", "rendered"):
+            value = snapshot.get(field)
+            if not isinstance(value, str) or len(value.encode("utf-8")) > MAX_FROZEN_SNAPSHOT_BYTES:
+                raise ValueError("wordpress_snapshot_shape_invalid")
+        for field in ("publisher_id", "expires_at"):
+            value = snapshot.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError("wordpress_snapshot_shape_invalid")
+        if (snapshot.get("visibility") != "public"
+                or not isinstance(snapshot.get("target_id"), int)
+                or isinstance(snapshot["target_id"], bool) or snapshot["target_id"] != 0):
+            raise ValueError("wordpress_snapshot_shape_invalid")
+        compiler = snapshot.get("compiler")
+        policy = snapshot.get("policy")
+        inventory = snapshot.get("inventory")
+        if not isinstance(compiler, dict) or not compiler or not isinstance(policy, dict) or not policy:
+            raise ValueError("wordpress_snapshot_shape_invalid")
+        if not isinstance(inventory, dict) or not 1 <= len(inventory) <= MAX_FILES:
+            raise ValueError("wordpress_snapshot_shape_invalid")
+
+        def canonical(value):
+            try:
+                return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            except (TypeError, ValueError, UnicodeEncodeError) as error:
+                raise ValueError("wordpress_snapshot_shape_invalid") from error
+
+        if hashlib.sha256(canonical(compiler)).hexdigest() != snapshot["compiler_sha256"]:
+            raise ValueError("wordpress_snapshot_compiler_binding_mismatch")
+        for relative, record in inventory.items():
+            if (not isinstance(relative, str) or not isinstance(record, dict)
+                    or set(record) != {"bytes", "sha256", "mime"}
+                    or not isinstance(record.get("bytes"), int) or isinstance(record["bytes"], bool)
+                    or record["bytes"] < 0 or not isinstance(record.get("sha256"), str)
+                    or not HEX64.fullmatch(record["sha256"]) or record.get("mime") != WordPressTransport._mime(relative)):
+                raise ValueError("wordpress_snapshot_inventory_invalid")
+            path = PurePosixPath(relative)
+            if path.is_absolute() or not path.parts or "\\\\" in relative or any(part in ("", ".", "..") for part in path.parts):
+                raise ValueError("wordpress_snapshot_inventory_invalid")
+
+    def frozen_snapshot(self, operation_id: str) -> dict:
+        """Read one bounded, canonical, owner-scoped server snapshot without writes."""
+        if not isinstance(operation_id, str) or not HEX32.fullmatch(operation_id):
+            raise ValueError("operation_id_invalid")
+        status, body = self._exchange("GET", f"{OPERATIONS_ROUTE}/{operation_id}/snapshot")
+        if status != 200:
+            raise ValueError(f"wordpress_snapshot_rejected_{status}")
+        if len(body) > MAX_FROZEN_RESPONSE_BYTES:
+            raise ValueError("wordpress_snapshot_response_too_large")
+
+        def pairs(items):
+            value = {}
+            for key, item in items:
+                if key in value:
+                    raise ValueError("wordpress_snapshot_duplicate_json_key")
+                value[key] = item
+            return value
+
+        try:
+            response = json.loads(body.decode("utf-8"), object_pairs_hook=pairs, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("invalid_json_constant")))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("wordpress_snapshot_invalid_json") from error
+        if not isinstance(response, dict) or set(response) != {"id", "digest", "state", "snapshot_json"}:
+            raise ValueError("wordpress_snapshot_contract_mismatch")
+        if response.get("id") != operation_id:
+            raise ValueError("wordpress_operation_identity_mismatch")
+        digest = response.get("digest")
+        state = response.get("state")
+        snapshot_json = response.get("snapshot_json")
+        if not isinstance(digest, str) or not HEX64.fullmatch(digest):
+            raise ValueError("wordpress_snapshot_digest_invalid")
+        if state not in {"pending", "approved"}:
+            raise ValueError("wordpress_snapshot_state_invalid")
+        if not isinstance(snapshot_json, str):
+            raise ValueError("wordpress_snapshot_json_invalid")
+        try:
+            raw = snapshot_json.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("wordpress_snapshot_json_invalid") from error
+        if not raw or len(raw) > MAX_FROZEN_SNAPSHOT_BYTES:
+            raise ValueError("wordpress_snapshot_size_limit")
+        try:
+            snapshot = json.loads(snapshot_json, object_pairs_hook=pairs, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("invalid_json_constant")))
+        except (json.JSONDecodeError, UnicodeEncodeError) as error:
+            raise ValueError("wordpress_snapshot_json_invalid") from error
+        if not isinstance(snapshot, dict):
+            raise ValueError("wordpress_snapshot_json_invalid")
+        try:
+            canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError) as error:
+            raise ValueError("wordpress_snapshot_json_invalid") from error
+        if canonical != raw:
+            raise ValueError("wordpress_snapshot_json_not_canonical")
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError("wordpress_snapshot_digest_mismatch")
+        self._frozen_snapshot_shape(snapshot)
+        if snapshot.get("operation_key") != operation_id:
+            raise ValueError("wordpress_snapshot_identity_mismatch")
+        return {"id": operation_id, "digest": digest, "state": state, "snapshot_json": snapshot_json}
 
     def commit(self, operation_id: str, digest: str) -> dict:
         if not isinstance(operation_id, str) or not HEX32.fullmatch(operation_id):

@@ -119,6 +119,8 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
             wp_port = None
             bridge = None
             bridge_port = None
+            safe_bridge = None
+            safe_bridge_port = None
             try:
                 import selectors
                 selector = selectors.DefaultSelector()
@@ -251,6 +253,141 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                 identity["operation_state"] = status_value["remote"]["state"]
                 self.assertEqual(identity["operation_state"], "pending")
 
+                # The approved publication PNG resource URL must render through
+                # the exact WordPress pipeline without widening KSES or changing
+                # the frozen reviewer-visible bytes.
+                frozen_route = f"/wp-json/publication-v1/v1/operations/{operation_id}/snapshot"
+                frozen_status, _headers, frozen_bytes = http_exchange(
+                    wp_port, "GET", frozen_route, headers={"X-Test-Publisher": publisher_token}
+                )
+                self.assertEqual(frozen_status, 200, frozen_bytes)
+                frozen_value = json.loads(frozen_bytes)
+                self.assertEqual(frozen_value["digest"], digest)
+                proof_status, _headers, proof_bytes = http_exchange(
+                    wp_port, "POST", "/__test__/snapshot-readback-probes",
+                    headers={"X-Test-Harness": control_token, "Content-Type": "application/json"},
+                    body=json.dumps({"id": operation_id}).encode(),
+                )
+                proof = json.loads(proof_bytes)
+                self.assertEqual(proof_status, 200, proof)
+                self.assertEqual(proof["publisher_status"], 200, proof)
+                self.assertTrue(proof["rendered_kses_unchanged"], proof)
+                self.assertTrue(proof["rendered_matches_real_the_content"], proof)
+                self.assertNotIn('decoding="async"', proof["rendered"])
+                self.assertTrue(proof["unsupported_filter_output_rejected"], proof)
+                self.assertEqual(proof["snapshot_sha256"], digest)
+                self.assertEqual(proof["decoding_scope"], {"pretty": True, "query": True, "ordinary_unchanged": True, "foreign_unchanged": True, "missing_inventory_unchanged": True})
+                self.assertIn("private", proof["snapshot_cache_control"])
+                self.assertIn("no-store", proof["snapshot_cache_control"])
+                self.assertEqual(proof["reviewer_status"], 403, proof)
+                self.assertEqual(proof["other_publisher_status"], 404, proof)
+                self.assertEqual(proof["anonymous_status"], 403, proof)
+                frozen_status, _headers, frozen_body = bridge_request("GET", f"/v1/frozen/{operation_id}")
+                self.assertEqual(frozen_status, 200)
+                frozen_png = json.loads(frozen_body)
+                self.assertEqual(frozen_png["digest"], digest)
+                self.assertEqual(frozen_png["operation_id"], operation_id)
+                self.assertEqual(json.loads(frozen_png["snapshot_json"])["rendered"], proof["rendered"])
+                self.assertIs(frozen_png["publication_approval"], False)
+                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/commit"), 0), 0)
+                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/operations"), 0), 1)
+
+                # A separate saved, text-only synthetic note exercises successful
+                # frozen read-back through the same persistent real WordPress
+                # worker without bypassing its KSES/rendering gate.
+                safe_selected = "文章/子目录/安全读回.md"
+                safe_note = vault / safe_selected
+                safe_note.write_text("# 安全读回\n\n[普通链接](https://example.test/path)。\n", encoding="utf-8")
+                safe_note.with_suffix(".labels.json").write_bytes(b"{}")
+                safe_session = BridgeSession(
+                    vault=vault, selected=safe_selected, store=root / "packages",
+                    receipts_dir=root / "safe-receipts", transport=transport,
+                    site_pin=SITE, policy_sha256=POLICY,
+                )
+                safe_receipt = safe_session.prepare("安全读回文章", {})
+                safe_operation_id = safe_receipt["operation_id"]
+                self.assertNotEqual(safe_operation_id, operation_id)
+                safe_bridge = LoopbackHTTPListener(safe_session)
+                safe_bridge.start()
+                safe_bridge_port = safe_bridge.port
+                safe_authorization = safe_bridge.take_startup_authorization()
+                safe_path = f"/v1/frozen/{safe_operation_id}"
+                missing_auth_status, _headers, _body = http_exchange(
+                    safe_bridge_port, "GET", safe_path, headers={"Origin": ORIGIN}
+                )
+                self.assertEqual(missing_auth_status, 401)
+                wrong_origin_status, _headers, _body = http_exchange(
+                    safe_bridge_port, "GET", safe_path,
+                    headers={"Origin": "https://evil.example", "Authorization": safe_authorization},
+                )
+                self.assertEqual(wrong_origin_status, 403)
+
+                def safe_bridge_request():
+                    return http_exchange(
+                        safe_bridge_port, "GET", safe_path,
+                        headers={"Origin": ORIGIN, "Authorization": safe_authorization},
+                    )
+
+                safe_status, safe_response_headers, safe_body = safe_bridge_request()
+                self.assertEqual(safe_status, 200, safe_body)
+                safe_frozen = json.loads(safe_body)
+                self.assertEqual(set(safe_frozen), {"operation_id", "digest", "state", "snapshot_json", "package_id", "publication_approval"})
+                self.assertEqual(safe_frozen["operation_id"], safe_operation_id)
+                self.assertEqual(safe_frozen["digest"], safe_receipt["remote_digest"])
+                self.assertEqual(safe_frozen["state"], "pending")
+                self.assertEqual(safe_frozen["package_id"], safe_receipt["manifest_sha256"])
+                self.assertIs(safe_frozen["publication_approval"], False)
+                self.assertEqual(safe_response_headers["Cache-Control"], "no-store")
+                safe_raw = safe_frozen["snapshot_json"].encode("utf-8")
+                self.assertEqual(hashlib.sha256(safe_raw).hexdigest(), safe_frozen["digest"])
+                safe_snapshot = json.loads(safe_raw)
+                self.assertEqual(safe_snapshot["operation_key"], safe_operation_id)
+                self.assertEqual(safe_snapshot["source_sha256"], safe_receipt["source_sha256"])
+                self.assertEqual(safe_snapshot["title"], "安全读回文章")
+                safe_proof_status, _headers, safe_proof_bytes = http_exchange(
+                    wp_port, "POST", "/__test__/snapshot-readback-probes",
+                    headers={"X-Test-Harness": control_token, "Content-Type": "application/json"},
+                    body=json.dumps({"id": safe_operation_id}).encode(),
+                )
+                safe_proof = json.loads(safe_proof_bytes)
+                self.assertEqual(safe_proof_status, 200, safe_proof)
+                self.assertEqual(safe_proof["publisher_status"], 200, safe_proof)
+                self.assertEqual(safe_proof["snapshot_json"], safe_frozen["snapshot_json"])
+                self.assertEqual(safe_proof["rendered"], safe_snapshot["rendered"])
+                self.assertTrue(safe_proof["rendered_kses_unchanged"], safe_proof)
+                self.assertTrue(safe_proof["rendered_matches_real_the_content"], safe_proof)
+                self.assertEqual(safe_proof["snapshot_sha256"], safe_frozen["digest"])
+                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/commit"), 0), 0)
+                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/operations"), 0), 2)
+
+                # Modified bodies cannot override the digest already anchored in
+                # the safe operation's durable receipt.
+                original_frozen_snapshot = transport.frozen_snapshot
+                try:
+                    for mutation, replace_digest in (("changed-rendered", False), ("changed-operation", True), ("changed-source", True)):
+                        changed = dict(safe_snapshot)
+                        if mutation == "changed-rendered":
+                            changed["rendered"] += "tampered"
+                        elif mutation == "changed-operation":
+                            changed["operation_key"] = "f" * 32
+                        else:
+                            changed["source_sha256"] = "0" * 64
+                        changed_json = json.dumps(changed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                        changed_digest = hashlib.sha256(changed_json.encode("utf-8")).hexdigest() if replace_digest else safe_frozen["digest"]
+                        transport.frozen_snapshot = lambda _operation_id, raw=changed_json, changed_hash=changed_digest: {
+                            "id": safe_operation_id, "digest": changed_hash, "state": "pending", "snapshot_json": raw,
+                        }
+                        rejected_status, _headers, rejected_body = safe_bridge_request()
+                        self.assertEqual(rejected_status, 404, (mutation, rejected_body))
+                finally:
+                    transport.frozen_snapshot = original_frozen_snapshot
+
+                saved_source = safe_note.read_bytes()
+                safe_note.write_bytes(saved_source + b"local source drift\n")
+                drift_status, _headers, drift_body = safe_bridge_request()
+                self.assertEqual(drift_status, 404, drift_body)
+                safe_note.write_bytes(saved_source)
+
                 probe_status, _headers, probe_bytes = http_exchange(
                     wp_port, "POST", "/__test__/unapproved-commit-probe",
                     headers={"X-Test-Harness": control_token, "Content-Type": "application/json"},
@@ -263,10 +400,12 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                 status, _headers, body = bridge_request("POST", "/v1/prepare", {"title": "真实 WP 会话接线", "approved_assets": approvals})
                 self.assertEqual(status, 409, body)
                 self.assertEqual(json.loads(body)["code"], "operation_outcome_unresolved")
-                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/packages"), 0), 1)
-                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/operations"), 0), 1)
-                self.assertEqual(operation_post_ids, [operation_id])
-                self.assertEqual([row[0] for row in remote_responses["uploads"]], [201])
+                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/packages"), 0), 2)
+                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/operations"), 0), 2)
+                self.assertEqual(operation_post_ids.count(operation_id), 1)
+                self.assertEqual(operation_post_ids.count(safe_operation_id), 1)
+                self.assertEqual(len(operation_post_ids), 2)
+                self.assertEqual([row[0] for row in remote_responses["uploads"]], [201, 201])
 
                 review_status, _headers, review_bytes = http_exchange(
                     wp_port, "POST", "/__test__/simulated-reviewer-approval",
@@ -324,9 +463,11 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                 self.assertNotIn(authorization, serialized)
                 self.assertNotIn(publisher_token, serialized)
                 self.assertNotIn(control_token, serialized)
-                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/packages"), 0), 1)
-                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/operations"), 0), 1)
-                self.assertEqual(operation_post_ids, [operation_id])
+                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/packages"), 0), 2)
+                self.assertEqual(call_counts.get(("POST", "/wp-json/publication-v1/v1/operations"), 0), 2)
+                self.assertEqual(operation_post_ids.count(operation_id), 1)
+                self.assertEqual(operation_post_ids.count(safe_operation_id), 1)
+                self.assertEqual(len(operation_post_ids), 2)
 
                 print("SESSION_WORDPRESS_EVIDENCE=" + json.dumps({
                     "run_id": run_id,
@@ -336,6 +477,10 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                     "unknown_operation_id": unknown_operation_id,
                     "unknown_response_same_id_no_duplicate": operation_post_ids.count(unknown_operation_id) == 1,
                     "committed_operation_id": operation_id,
+                    "safe_frozen_operation_id": safe_operation_id,
+                    "safe_frozen_preview_readback": True,
+                    "png_frozen_readback_kses_real_content": True,
+                    "unsupported_filter_output_fail_closed": proof["unsupported_filter_output_rejected"],
                     "prepare_pending_digest": digest,
                     "unapproved_commit_http_status": probe["status"],
                     "reviewer_approval": "SIMULATED",
@@ -344,6 +489,10 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                     "bridge_requests": {f"{method} {path}": count for (method, path), count in sorted(call_counts.items())},
                 }, ensure_ascii=False, sort_keys=True))
             finally:
+                if safe_bridge is not None:
+                    safe_bridge.close()
+                    if safe_bridge_port is not None:
+                        assert_port_closed(safe_bridge_port)
                 if bridge is not None:
                     bridge.close()
                     if bridge_port is not None:

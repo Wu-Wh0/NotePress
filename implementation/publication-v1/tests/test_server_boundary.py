@@ -124,8 +124,8 @@ class PublicationV1SourceBoundaryTests(unittest.TestCase):
 
     def test_current_snapshot_must_match_its_stored_digest_before_refreezing(self) -> None:
         combined = "\n".join(product_php().values())
-        self.assertIn("pubv1_digest($record['snapshot'])", combined)
-        self.assertRegex(combined, r"hash_equals\(\$record\['digest'\],\s*\(string\)\s*pubv1_digest\(\$record\['snapshot'\]\)\)")
+        self.assertIn("pubv1_snapshot_digest($record['snapshot'])", combined)
+        self.assertRegex(combined, r"hash_equals\(\$record\['digest'\],\s*\(string\)\s*pubv1_snapshot_digest\(\$record\['snapshot'\]\)\)")
 
     def test_php_files_lint_when_php_is_available(self) -> None:
         php = shutil.which("php")
