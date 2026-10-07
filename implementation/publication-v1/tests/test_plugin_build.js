@@ -15,9 +15,11 @@ test('single-file plugin loads through an Obsidian-shaped external require witho
   assert.equal(r.status,0,r.stderr);
   const bytes=fs.readFileSync(path.join(dir,'main.js'));
   const calls=[];
+  const notices=[];
+  class FakeNotice {constructor(message){this.message=message;this.hidden=false;notices.push(this);}setMessage(message){this.message=message;}hide(){this.hidden=true;}}
   const context={module:{exports:{}},require:id=>{
    calls.push(id);
-   if(id==='obsidian')return {Plugin:class{},ItemView:class{},Notice:class{}};
+   if(id==='obsidian')return {Plugin:class{},ItemView:class{},Notice:FakeNotice};
    if(id.startsWith('.'))throw new Error('native_relative_module_unavailable');
    return require(id);
   },process,Buffer,URL,AbortController,console,setTimeout,clearTimeout};
@@ -31,6 +33,13 @@ test('single-file plugin loads through an Obsidian-shaped external require witho
   plugin.writingView={clearSessionPreview(){},update(event){states.push(event.state);}};
   plugin.setPublicationSession(null);
   assert.equal(states.at(-1),'disconnected');
+  plugin.notifyLiveState({state:'waiting'});
+  plugin.notifyLiveState({state:'generating'});
+  plugin.notifyLiveState({state:'synced'});
+  assert.equal(notices.length,1,'one native notice reused across transitions');
+  assert.equal(notices[0].message,'预览已更新');
+  plugin.clearLiveNotice();
+  assert.equal(notices[0].hidden,true);
   const again=spawnSync(process.execPath,[build,dir],{encoding:'utf8'});
   assert.equal(again.status,0,again.stderr);
   assert.deepEqual(fs.readFileSync(path.join(dir,'main.js')),bytes);
