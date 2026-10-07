@@ -33,7 +33,7 @@ jobs:
         run: |
           command -v php
           python -B -m unittest discover -s tests -p test_server_boundary.py -v
-          node --test tests/test_plugin_selection.js tests/test_plugin_entry.js tests/test_session_launcher_argv.js
+          node --test tests/test_plugin_selection.js tests/test_plugin_entry.js tests/test_session_launcher_argv.js tests/test_plugin_build.js
           for file in server/*.php; do php -l "$file"; done
   full-wordpress:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs['full-wordpress'] }}
