@@ -5,6 +5,8 @@ const net = require('node:net');
 
 const MAX_HANDSHAKE_BYTES = 4096;
 const STARTUP_TIMEOUT_MS = 10000;
+const ISOLATED_TEST_STARTUP_TIMEOUT_MS = 180000;
+const ISOLATED_TEST_SITE_PIN = 'https://publication-v1.example.test';
 const SHUTDOWN_TIMEOUT_MS = 5000;
 const RUNTIME_ENV_KEYS = new Set(['PUBLICATION_NODE', 'PUBLICATION_PARSER_ROOT', 'TMPDIR']);
 const SHELL_NAMES = new Set(['sh', 'bash', 'dash', 'zsh', 'fish', 'cmd.exe', 'powershell.exe', 'pwsh.exe']);
@@ -19,7 +21,7 @@ function normalizedVault(value) {
 }
 
 function launchConfiguration(value) {
-  if (!plainObject(value) || Object.keys(value).some(key => !['command', 'args', 'env', 'vaultMap'].includes(key))) {
+  if (!plainObject(value) || Object.keys(value).some(key => !['command', 'args', 'env', 'vaultMap', 'mode'].includes(key))) {
     throw new Error('bridge_launch_invalid');
   }
   const command = value.command;
@@ -38,7 +40,9 @@ function launchConfiguration(value) {
     if (typeof item !== 'string' || item.length > 4096 || item.includes('\0')) throw new Error('bridge_launch_invalid');
     runtimeEnv[key] = item;
   }
-  return { command, args: [...args], env: runtimeEnv };
+  const mode = value.mode === undefined ? 'live' : value.mode;
+  if (!['live', 'isolated-publication-test'].includes(mode)) throw new Error('bridge_launch_invalid');
+  return { command, args: [...args], env: runtimeEnv, mode };
 }
 
 function mappedVaultPath(launch, actualVault, expectedVault) {
@@ -121,10 +125,13 @@ function waitForLoopback(origin) {
   return { promise, cancel: () => cancel?.() };
 }
 
-function parseHandshake(line) {
+function parseHandshake(line, mode) {
   let value;
   try { value = JSON.parse(line.toString('utf8')); } catch { throw new Error('local_session_start_failed'); }
-  if (!plainObject(value) || Object.keys(value).sort().join(',') !== 'authorization,origin,type'
+  const keys = mode === 'isolated-publication-test'
+    ? 'authorization,origin,sitePin,type,workflowConnected'
+    : 'authorization,origin,type';
+  if (!plainObject(value) || Object.keys(value).sort().join(',') !== keys
     || value.type !== 'ready' || typeof value.origin !== 'string'
     || typeof value.authorization !== 'string' || !/^Bearer [A-Za-z0-9_-]{43}$/.test(value.authorization)) {
     throw new Error('local_session_start_failed');
@@ -137,7 +144,17 @@ function parseHandshake(line) {
   } catch {
     throw new Error('local_session_start_failed');
   }
-  return { origin: value.origin, authorization: value.authorization };
+  if (mode === 'isolated-publication-test'
+    && (value.workflowConnected !== true || value.sitePin !== ISOLATED_TEST_SITE_PIN)) {
+    throw new Error('local_session_start_failed');
+  }
+  return {
+    origin: value.origin,
+    authorization: value.authorization,
+    ...(mode === 'isolated-publication-test'
+      ? { workflowConnected: true, sitePin: ISOLATED_TEST_SITE_PIN }
+      : {}),
+  };
 }
 
 function spawnLocalLauncher(launch, runtimeConfig) {
@@ -173,7 +190,10 @@ function spawnLocalLauncher(launch, runtimeConfig) {
     cancelReadiness();
     rejectReady(new Error('local_session_start_failed'));
   };
-  const timer = setTimeout(fail, STARTUP_TIMEOUT_MS);
+  const startupTimeoutMs = config.mode === 'isolated-publication-test'
+    ? ISOLATED_TEST_STARTUP_TIMEOUT_MS
+    : STARTUP_TIMEOUT_MS;
+  const timer = setTimeout(fail, startupTimeoutMs);
   child.once('error', fail);
   child.once('close', fail);
   child.stdin.once('error', fail);
@@ -191,7 +211,7 @@ function spawnLocalLauncher(launch, runtimeConfig) {
     if (newline < 0) return;
     if (newline !== output.length - 1) { fail(); return; }
     try {
-      const session = parseHandshake(output.subarray(0, newline));
+      const session = parseHandshake(output.subarray(0, newline), config.mode);
       output.fill(0);
       output = Buffer.alloc(0);
       if (windowsWslLauncher(config)) {

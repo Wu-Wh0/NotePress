@@ -173,6 +173,17 @@ try {
         res.end(JSON.stringify({ status: result.status, response: result.text }));
         return;
       }
+      if (route === '/__test__/publication-counts' && req.method === 'POST' && control) {
+        const counts = await phpJson(`<?php
+          require_once '${sitePath}/wp-load.php'; global $wpdb;
+          $posts = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'post'");
+          $operations = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = %s", '_publication_v1_operation'));
+          echo json_encode(array('post_count' => $posts, 'publication_operation_meta_count' => $operations));
+        `, 'synthetic publication count readback');
+        res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        res.end(JSON.stringify(counts));
+        return;
+      }
       if (route === '/__test__/identity' && req.method === 'POST' && control) {
         const value = JSON.parse(body.toString('utf8'));
         const packageResult = await wpRequest('GET', `/wp-json/publication-v1/v1/packages/${value.package_id}`, undefined, 'publisher');
