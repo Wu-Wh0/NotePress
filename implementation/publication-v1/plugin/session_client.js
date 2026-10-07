@@ -325,9 +325,12 @@ async function renderLiveSession(session, selected, browserWindow) {
       return `url("${value}")`;
     });
     if (!fontReferences || /url\s*\(\s*(?!["']?blob:)/i.test(safeCss)) throw new Error('live_preview_css_invalid');
-    const cssUrl = browserWindow.URL.createObjectURL(new browserWindow.Blob([safeCss], { type: 'text/css;charset=utf-8' }));
-    objectUrls.add(cssUrl);
-    html = html.replace('href="assets/katex.min.css"', `href="${cssUrl}"`);
+    if (safeCss.includes('<')) throw new Error('live_preview_css_invalid');
+    const dark = browserWindow.document?.body?.classList?.contains('theme-dark') === true;
+    const baseCss = `:root{color-scheme:${dark ? 'dark' : 'light'}}body{margin:16px;color:${dark ? '#dadada' : '#222'};background:${dark ? '#1e1e1e' : '#fff'};font-family:system-ui,sans-serif;line-height:1.6}pre,.math-scroll{max-width:100%;overflow-x:auto}img{max-width:100%;height:auto}`;
+    // srcdoc in native Obsidian did not apply the blob stylesheet. Embed only
+    // byte-verified, URL-rewritten CSS; scripts and remote resources remain denied.
+    html = html.replace('<link rel="stylesheet" href="assets/katex.min.css">', `<style>${safeCss}${baseCss}</style>`);
     for (const [path, value] of urls) {
       if (IMAGE_PATH.test(path)) html = html.replaceAll(`src="${path}"`, `src="${value}"`);
     }

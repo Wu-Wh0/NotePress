@@ -61,4 +61,21 @@ The child returns one bounded private stdout handshake containing its ephemeral 
 
 The Python session has no remote transport. Its site pin is the reserved `https://local-only.invalid` value used internally by the existing session core; it is **not** a WordPress site identity. `/v1/prepare`, `/v1/status`, and `/v1/commit` are denied. Plugin freeze, receipt-check, and recovery commands return `session_workflow_not_connected` in session mode. No publish/approval workflow is implemented here.
 
-The focused Linux subprocess test exercises the native Linux launch path. The Windows-host → WSL path is exercised by `tests/windows_wsl_live_probe.cjs` with a real WSL Python listener, authenticated loopback HTTP, and asset-bundle rendering through host API/Blob/URL stubs. Native Obsidian GUI and visual acceptance remain unverified.
+The focused Linux subprocess test exercises the native Linux launch path. The Windows-host → WSL path is exercised by `tests/windows_wsl_live_probe.cjs` with a real WSL Python listener, authenticated loopback HTTP, and asset-bundle rendering through host API/Blob/URL stubs. That proof alone does not establish native GUI or visual acceptance; the separately exercised isolated native scope is described below.
+
+
+## Native Obsidian build and acceptance boundary
+
+Raw `plugin/main.js` imports sibling modules and is not a native-install artifact. Obsidian 1.12.7 rejected the raw multi-file copy with `Cannot find module './live'`. Build the finite CommonJS closure with an explicit output directory:
+
+```bash
+node plugin/build.cjs /absolute/path/to/synthetic-vault/.obsidian/plugins/blog-entry-preview
+```
+
+The dependency-free builder emits deterministic `main.js` and `manifest.json`, prints source and bundle SHA-256 inventory, and refuses to overwrite the source directory. It does not copy runtime config, secrets or content. Add only the reviewed non-sensitive `data.json` launch config in an explicitly isolated test vault; never deploy this test artifact into the primary vault by default.
+
+Writing preview embeds only byte-verified and URL-rewritten KaTeX CSS in the sandboxed `srcdoc`: native Obsidian did not apply the external blob stylesheet even though host-stub resource checks passed. Markup in CSS is rejected; fonts/images remain verified blob resources, scripts and external loading remain denied. The base style explicitly supplies readable dark/light colors, and disconnect clears/hides the preview and reports a non-connected state through a native Obsidian Notice.
+
+The writing pane has only the sandboxed article frame: no persistent status paragraph, repeated pane header or not-yet-connected prepare button. Its tab label is simply `写作预览`; the article H1 is retained. Waiting, rendering, success, blocked and disconnected states reuse one native Notice, with short terminal-state expiry and unload cleanup, rather than stacking a new popup on every keystroke. Freeze commands remain fail-closed.
+
+Synthetic native acceptance covers actual Obsidian plugin loading, registered live/disconnect commands, editor-change automatic updates, real WSL listener, actual KaTeX fonts/pixels and framework unload cleanup. It is not user visual approval, publication readiness, arbitrary third-party theme compatibility or primary-vault deployment. Current finite rendering policy still rejects language-labelled fences (use plain/text fences) and requires display-math `$$` delimiters on their own lines; do not weaken these gates merely to make a fixture pass.
