@@ -64,6 +64,16 @@ The Python session has no remote transport. Its site pin is the reserved `https:
 The focused Linux subprocess test exercises the native Linux launch path. The Windows-host → WSL path is exercised by `tests/windows_wsl_live_probe.cjs` with a real WSL Python listener, authenticated loopback HTTP, and asset-bundle rendering through host API/Blob/URL stubs. That proof alone does not establish native GUI or visual acceptance; the separately exercised isolated native scope is described below.
 
 
+## Session-only title and local PNG inputs
+
+The command `设置当前写作预览标题与 PNG` opens a native modal for the connected selected note. The title is independent metadata: it does not rename the note or rewrite its source H1. A PNG path is relative to that note's directory (Chinese and nested paths are supported; spaces, traversal, hidden path components and other unsafe paths are rejected).
+
+`检查 PNG 元数据` calls authenticated `POST /v1/asset-candidate` and returns only validated metadata. Checking is not approval: a separate `明确批准此 PNG` click binds that path to its SHA-256. Up to eight PNG approvals are held in this session only; each can be removed. PNG byte changes revoke approval and block stale previews. Changing notes, disconnecting or unloading clears these inputs. Title/approval changes hide the old preview and invalidate in-flight results. Settings are not written, and no body-reference image is automatically approved.
+
+This local image confirmation is not article publication approval. Automated fixture clicks must be marked SIMULATED. It does not connect freeze, reviewer or WordPress publishing; native and human acceptance remain separate from portable tests.
+
+Known non-blocking efficiency limitation: Coordinator cache reuse requires an expiry value that the authenticated live-session response does not provide. Actual sessions re-render; cache-specific tests use synthetic expiry-bearing outputs. This does not weaken input or asset binding and is not changed in this slice.
+
 ## Native Obsidian build and acceptance boundary
 
 Raw `plugin/main.js` imports sibling modules and is not a native-install artifact. Obsidian 1.12.7 rejected the raw multi-file copy with `Cannot find module './live'`. Build the finite CommonJS closure with an explicit output directory:

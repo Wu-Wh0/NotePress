@@ -305,6 +305,18 @@ class BridgeSession:
             if receipt.get("state") in ACTIVE_STATES:
                 raise ValueError("operation_outcome_unresolved")
 
+    def asset_candidate(self, relative: str) -> dict:
+        """Inspect exactly one note-relative PNG without granting approval."""
+        self._ensure_open()
+        raw = read_selected_asset(self.vault, self.selected, relative)
+        producer._validate_png(raw)
+        return {
+            "path": relative,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "mime": "image/png",
+            "bytes": len(raw),
+        }
+
     def live_render(self, title: str, approved_assets: dict) -> dict:
         self._ensure_open()
         package_id, package_path, result = self._package(title, approved_assets)
@@ -824,6 +836,10 @@ class BridgeDispatcher:
             return self._json(415, {"code": "json_required"})
         try:
             request = self._json_body(body)
+            if path == "/v1/asset-candidate":
+                if set(request) != {"path"}:
+                    raise ValueError("request_fields_invalid")
+                return self._json(200, self.session.asset_candidate(request["path"]))
             if path == "/v1/live":
                 if set(request) != {"path", "text", "source_sha256", "title", "approved_assets", "approved_labels"}:
                     raise ValueError("request_fields_invalid")

@@ -394,7 +394,7 @@ print(json.dumps({'launcher_ok': launcher.is_file() and not launcher.is_symlink(
     const originalSpawn = childProcess.spawn;
     const spawnRecords = [];
     Module._load = function (request, parent, isMain) {
-      if (request === 'obsidian') return { Plugin: class Plugin {}, Notice: class Notice {}, ItemView: class ItemView {} };
+      if (request === 'obsidian') return { Plugin: class Plugin {}, Notice: class Notice {}, ItemView: class ItemView {}, Modal: class Modal {} };
       return originalModuleLoad.call(this, request, parent, isMain);
     };
     childProcess.spawn = function (command, args, options) {

@@ -12,6 +12,7 @@ Module._load = function (request, parent, isMain) {
       Plugin: class Plugin {},
       Notice: class Notice {},
       ItemView: class ItemView {},
+      Modal: class Modal {},
     };
   }
   return originalLoad.call(this, request, parent, isMain);

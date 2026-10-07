@@ -19,7 +19,7 @@ test('single-file plugin loads through an Obsidian-shaped external require witho
   class FakeNotice {constructor(message){this.message=message;this.hidden=false;notices.push(this);}setMessage(message){this.message=message;}hide(){this.hidden=true;}}
   const context={module:{exports:{}},require:id=>{
    calls.push(id);
-   if(id==='obsidian')return {Plugin:class{},ItemView:class{},Notice:FakeNotice};
+   if(id==='obsidian')return {Plugin:class{},ItemView:class{},Notice:FakeNotice,Modal:class{}};
    if(id.startsWith('.'))throw new Error('native_relative_module_unavailable');
    return require(id);
   },process,Buffer,URL,AbortController,console,setTimeout,clearTimeout};
