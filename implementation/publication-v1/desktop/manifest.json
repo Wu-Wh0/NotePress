@@ -1,0 +1,9 @@
+{
+  "id": "blog-publisher-local",
+  "name": "Blog Publisher Local",
+  "version": "0.1.0",
+  "minAppVersion": "1.12.7",
+  "description": "当前笔记离线预览与本机固定输入包",
+  "author": "Local",
+  "isDesktopOnly": true
+}
