@@ -4,12 +4,41 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { Plugin, Notice, ItemView, Modal } = require('obsidian');
+const DirectConnectionSettingTab = require('./settings');
+const { probeWordPress } = require('./connection');
 const {
   renderDocument, readApprovedPng, readSelectedNote, createFixedInputPackage, safeAssetPath, PreviewGeneration,
 } = require('./core');
 
 const VIEW_TYPE = 'blog-publisher-local-preview';
 const MAX_SOURCE_BYTES = 65536;
+const CONNECTION_SUCCESS = '连接已验证；发布接线尚未完成。';
+const CONNECTION_ERRORS = Object.freeze({
+  invalid_site: '连接失败：站点地址不符合 HTTPS 要求。',
+  invalid_account: '连接失败：账号信息无效。',
+  missing_secret: '连接失败：未找到所选发布凭据。',
+  auth_failed: '连接失败：账号验证未通过。',
+  account_permissions: '连接失败：账号缺少所需权限。',
+  api_missing: '连接失败：站点未提供所需连接接口。',
+  invalid_response: '连接失败：站点返回无效响应。',
+  response_too_large: '连接失败：站点响应超出限制。',
+  redirect_blocked: '连接失败：站点重定向被阻止。',
+  network_error: '连接失败：网络请求未完成。',
+  timeout: '连接失败：连接超时。',
+  cancelled: '连接已取消。',
+});
+
+function savedConnectionSettings(data) {
+  return {
+    siteUrl: typeof data?.siteUrl === 'string' ? data.siteUrl : '',
+    username: typeof data?.username === 'string' ? data.username : '',
+    secretName: typeof data?.secretName === 'string' ? data.secretName : '',
+  };
+}
+
+function validSecretName(name) {
+  return typeof name === 'string' && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name);
+}
 
 function notePathValid(value) {
   return typeof value === 'string' && value.endsWith('.md') && value.length <= 1024
@@ -265,6 +294,92 @@ module.exports = class BlogPublisherLocal extends Plugin {
     this.registerEvent(this.app.vault.on('modify', file => this.inputChanged(file.path)));
     this.registerEvent(this.app.vault.on('delete', file => this.inputChanged(file.path)));
     this.registerEvent(this.app.vault.on('rename', (_file, oldPath) => this.inputChanged(oldPath)));
+
+    this.connectionSettings = { siteUrl: '', username: '', secretName: '' };
+    this.connectionSettingsRevision = 0;
+    this.connectionProbeGeneration = 0;
+    this.connectionProbeController = null;
+    this.connectionSaveQueue = Promise.resolve();
+    this.connectionStatusMessage = '尚未测试连接。';
+    const loadRevision = this.connectionSettingsRevision;
+    let data;
+    try { data = await this.loadData(); } catch { data = null; }
+    if (this.unloaded) return;
+    if (this.connectionSettingsRevision === loadRevision) this.connectionSettings = savedConnectionSettings(data);
+    this.connectionSettingsTab = new DirectConnectionSettingTab(this.app, this);
+    this.addSettingTab(this.connectionSettingsTab);
+  }
+
+  setConnectionStatus(message) {
+    this.connectionStatusMessage = message;
+    this.connectionSettingsTab?.setStatus(message);
+  }
+
+  invalidateConnectionProbe() {
+    this.connectionProbeGeneration += 1;
+    const controller = this.connectionProbeController;
+    this.connectionProbeController = null;
+    controller?.abort();
+  }
+
+  updateConnectionSetting(key, value) {
+    if (!['siteUrl', 'username', 'secretName'].includes(key)) return Promise.resolve();
+    if (typeof value !== 'string' && !(key === 'secretName' && value === null)) return Promise.resolve();
+    const nextValue = value === null ? '' : value;
+    if (this.connectionSettings[key] === nextValue) return Promise.resolve();
+    this.connectionSettings = { ...this.connectionSettings, [key]: nextValue };
+    this.connectionSettingsRevision += 1;
+    this.invalidateConnectionProbe();
+    this.setConnectionStatus('连接设置已变化，请重新测试。');
+    const snapshot = {
+      siteUrl: this.connectionSettings.siteUrl,
+      username: this.connectionSettings.username,
+      secretName: this.connectionSettings.secretName,
+    };
+    const revision = this.connectionSettingsRevision;
+    this.connectionSaveQueue = this.connectionSaveQueue
+      .catch(() => {})
+      .then(() => this.saveData(snapshot))
+      .catch(() => {
+        if (!this.unloaded && revision === this.connectionSettingsRevision) this.setConnectionStatus('连接设置未能保存。');
+      });
+    return this.connectionSaveQueue;
+  }
+
+  async testConnection() {
+    if (this.unloaded) return false;
+    const generation = ++this.connectionProbeGeneration;
+    this.connectionProbeController?.abort();
+    const controller = new AbortController();
+    this.connectionProbeController = controller;
+    const isCurrent = () => !this.unloaded
+      && generation === this.connectionProbeGeneration
+      && this.connectionProbeController === controller;
+    this.setConnectionStatus('正在测试连接…');
+    try {
+      const { siteUrl, username, secretName } = this.connectionSettings;
+      if (!validSecretName(secretName)) throw Object.assign(new Error(), { code: 'missing_secret' });
+      const storage = this.app.secretStorage;
+      if (!storage || typeof storage.getSecret !== 'function') throw Object.assign(new Error(), { code: 'missing_secret' });
+      let secret;
+      try { secret = storage.getSecret(secretName); } catch { throw Object.assign(new Error(), { code: 'missing_secret' }); }
+      if (typeof secret !== 'string' || !secret) throw Object.assign(new Error(), { code: 'missing_secret' });
+      await probeWordPress({ siteUrl, username, secret, signal: controller.signal });
+      if (!isCurrent()) return false;
+      this.setConnectionStatus(CONNECTION_SUCCESS);
+      new Notice(CONNECTION_SUCCESS);
+      return true;
+    } catch (error) {
+      if (!isCurrent()) return false;
+      let code;
+      try { code = error?.code; } catch { code = undefined; }
+      const message = Object.hasOwn(CONNECTION_ERRORS, code) ? CONNECTION_ERRORS[code] : '连接失败：无法验证连接。';
+      this.setConnectionStatus(message);
+      new Notice(message);
+      return false;
+    } finally {
+      if (isCurrent()) this.connectionProbeController = null;
+    }
   }
 
   vaultRoot() { return this.app.vault.adapter.getBasePath(); }
@@ -467,6 +582,7 @@ module.exports = class BlogPublisherLocal extends Plugin {
 
   onunload() {
     this.unloaded = true;
+    this.invalidateConnectionProbe();
     this.generation.close();
     this.fixedInput = null;
     this.session = null;

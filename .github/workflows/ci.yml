@@ -52,8 +52,9 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         working-directory: implementation/publication-v1
         run: |
+          command -v openssl
           npm ci --prefix desktop --no-audit --no-fund
-          node --test --test-concurrency=1 tests/test_desktop_local*.js
+          node --test --test-concurrency=1 tests/test_desktop_*.js
   full-wordpress:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs['full-wordpress'] }}
     runs-on: ubuntu-24.04

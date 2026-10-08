@@ -15,10 +15,30 @@ function loadPlugin() {
     addCommand() {}
     addRibbonIcon() {}
     registerEvent() {}
+    loadData() { return Promise.resolve({}); }
+    saveData() { return Promise.resolve(); }
+    addSettingTab(tab) { this.app.settingTabs ??= []; this.app.settingTabs.push(tab); }
   }
+  class PluginSettingTab {
+    constructor(app, plugin) { this.app = app; this.plugin = plugin; this.containerEl = { empty() {} }; }
+  }
+  class Setting {
+    constructor(containerEl) { this.controlEl = {}; this.containerEl = containerEl; }
+    setName() { return this; }
+    setDesc() { return this; }
+    addText(callback) { callback({ setPlaceholder() { return this; }, setValue() { return this; }, onChange() { return this; } }); return this; }
+    addButton(callback) { callback({ setButtonText() { return this; }, onClick() { return this; } }); return this; }
+  }
+  class SecretComponent {
+    constructor() {}
+    setValue() { return this; }
+    onChange() { return this; }
+  }
+  class MockSettingsTab extends PluginSettingTab { display() {} }
+  const obsidian = { Plugin, PluginSettingTab, Setting, SecretComponent, Notice: class {}, ItemView: class {}, Modal: class {} };
   const module = { exports: {} };
   const factory = vm.runInThisContext(`(function(require,module,exports,__dirname){\n${fs.readFileSync(entry, 'utf8')}\n})`, { filename: entry });
-  factory(id => id === 'obsidian' ? { Plugin, Notice: class {}, ItemView: class {}, Modal: class {} } : realRequire(id),
+  factory(id => id === 'obsidian' ? obsidian : id === './settings' ? MockSettingsTab : id === './connection' ? { probeWordPress: async () => ({}) } : realRequire(id),
     module, module.exports, path.dirname(entry));
   return module.exports;
 }
