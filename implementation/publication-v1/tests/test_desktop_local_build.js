@@ -32,7 +32,7 @@ test('build rejects an existing linked output ancestor before changing protected
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
-test('build emits a self-contained installable desktop plugin with no bridge or publishing transport', () => {
+test('build emits a self-contained desktop plugin with explicit HTTPS probing and no bridge or subprocess', () => {
   const built = spawnSync(process.execPath, [path.join(root, 'desktop', 'build.cjs')], { cwd: root, encoding: 'utf8', timeout: 45000 });
   assert.equal(built.status, 0, `${built.stdout}\n${built.stderr}`);
   const other = spawnSync(process.execPath, [path.join(root, 'desktop', 'build.cjs')], { cwd: path.join(root, 'desktop'), encoding: 'utf8', timeout: 45000 });
@@ -48,5 +48,6 @@ test('build emits a self-contained installable desktop plugin with no bridge or 
   assert.ok(fonts.length > 0);
   const bundle = fs.readFileSync(path.join(dist, 'main.js'), 'utf8');
   assert.match(bundle, /require\(["']obsidian["']\)/);
-  assert.doesNotMatch(bundle, /node:(?:http|https|child_process)|http\.request|https\.request|child_process\.(?:spawn|exec)|(?:window|globalThis)\.fetch\s*\(/);
+  assert.match(bundle, /require\(["']node:https["']\)/);
+  assert.doesNotMatch(bundle, /node:(?:http|child_process)\b|http\.request|child_process\.(?:spawn|exec)|(?:window|globalThis)\.fetch\s*\(/);
 });
