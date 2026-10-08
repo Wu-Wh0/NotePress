@@ -1,0 +1,16 @@
+{
+  "name": "obsidian-wordpress-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop Obsidian publishing through native WordPress REST; no custom server plugin.",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "markdown-it": "14.1.0",
+    "katex": "0.16.22"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

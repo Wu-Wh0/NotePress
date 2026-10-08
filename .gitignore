@@ -1,0 +1,23 @@
+# Regenerable dependencies and build outputs
+node_modules/
+dist/
+coverage/
+.cache/
+__pycache__/
+*.pyc
+
+# Local credentials, databases and runtime output
+.env
+.env.*
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Private workspace material belongs outside the source checkout
+/private/
+/evidence/
+/review/
+/runtime/
