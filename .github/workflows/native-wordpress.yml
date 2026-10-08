@@ -22,8 +22,6 @@ jobs:
       run:
         shell: bash
         working-directory: obsidian-wordpress
-    env:
-      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -53,6 +51,10 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Test
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: npm test
       - name: Build desktop plugin and install ZIP
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: npm run build
