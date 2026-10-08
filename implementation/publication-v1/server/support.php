@@ -394,6 +394,14 @@ function pubv1_inventory_directory_matches($root, $manifest_sha256, $expected) {
     return count($seen) === count($expected);
 }
 
+function pubv1_activate() {
+    $role = get_role('administrator');
+    if ($role instanceof WP_Role) {
+        $role->add_cap('publish_publication_v1');
+        $role->add_cap('approve_publication_v1');
+    }
+}
+
 function pubv1_policy() {
     $files = glob(__DIR__ . '/*.php');
     if (!is_array($files) || count($files) < 4) {

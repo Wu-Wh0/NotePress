@@ -142,7 +142,10 @@ class ProducerServerContractTests(unittest.TestCase):
                 function rest_url($path = '') { return 'https://example.test/wp-json/' . ltrim($path, '/'); }
                 function wp_kses_post($html) { return $html; }
                 function apply_filters($tag, $value) { return $value; }
-                require '/plugin/publication-v1.php';
+                // Contract-only site/filter seams: exercise real package validation and freezing,
+                // not plugin activation. Complete WP activation is covered by fresh runtime tests.
+                require '/plugin/support.php';
+                require '/plugin/resources.php';
                 $package_id = '__PACKAGE_ID__';
                 $operation_id = '__OPERATION_ID__';
                 $loaded = pubv1_load_package($package_id);

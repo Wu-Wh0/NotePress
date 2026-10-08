@@ -477,13 +477,16 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                 self.assertEqual([row[0] for row in remote_responses["uploads"]], [201, 201])
 
                 review_status, _headers, review_bytes = http_exchange(
-                    wp_port, "POST", "/__test__/simulated-reviewer-approval",
+                    wp_port, "POST", "/__test__/simulated-owner-approval",
                     headers={"X-Test-Harness": control_token, "Content-Type": "application/json"},
                     body=json.dumps({"id": operation_id, "digest": digest}).encode(),
                 )
                 review = json.loads(review_bytes)
                 self.assertEqual(review_status, 200)
                 self.assertTrue(review["SIMULATED"], review)
+                self.assertEqual(review["cross_owner_status"], 403, review)
+                self.assertEqual(review["missing_nonce_status"], 403, review)
+                self.assertEqual(review["missing_cookie_status"], 403, review)
                 self.assertEqual(review["status"], 200, review)
 
                 status, _headers, body = bridge_request("GET", f"/v1/status/{operation_id}")
@@ -514,7 +517,9 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                 self.assertEqual(readback["state"], "committed")
                 self.assertTrue(readback["db_exact"], readback)
                 self.assertTrue(readback["one_post"], readback)
-                self.assertTrue(readback["reviewer_distinct"], readback)
+                self.assertGreater(readback["operation_owner_id"], 0, readback)
+                self.assertEqual(readback["operation_owner_id"], identity["publisher_id"], readback)
+                self.assertEqual(readback["recorded_approval_owner_id"], readback["operation_owner_id"], readback)
                 self.assertEqual(readback["core_status"], 200, readback)
                 core = json.loads(readback["core"])
                 self.assertEqual(core["status"], "publish", core)
@@ -553,7 +558,7 @@ class SessionWordPressIntegrationTests(unittest.TestCase):
                     "unsupported_filter_output_fail_closed": proof["unsupported_filter_output_rejected"],
                     "prepare_pending_digest": digest,
                     "unapproved_commit_http_status": probe["status"],
-                    "reviewer_approval": "SIMULATED",
+                    "owner_approval": "SIMULATED",
                     "explicit_bridge_commit": committed["state"],
                     "database_core_resource_readback": True,
                     "bridge_requests": {f"{method} {path}": count for (method, path), count in sorted(call_counts.items())},

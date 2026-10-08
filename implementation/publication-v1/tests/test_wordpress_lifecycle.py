@@ -81,7 +81,7 @@ $publisher_id = pv1_test_user($input['publisher_login']);
 $reviewer_id = pv1_test_user($input['reviewer_login']);
 $publisher = new WP_User($publisher_id);
 $publisher->add_cap('publish_publication_v1');
-// Overlap only this adversarial synthetic actor to reach the explicit self-check.
+// The publisher is also the owner-confirmation actor; reviewer is a cross-owner negative.
 $publisher->add_cap('approve_publication_v1');
 (new WP_User($reviewer_id))->add_cap('approve_publication_v1');
 $nonce = pv1_test_login($publisher_id);
@@ -185,9 +185,20 @@ $pending = maybe_unserialize(pubv1_read_raw_option($option_key));
 $unapproved = pv1_test_request('POST', '/publication-v1/v1/commit', array(
     'id' => $input['operation_id'], 'digest' => $digest,
 ));
-$self_approve = pv1_test_request('POST', '/publication-v1/v1/approve', array(
+$reviewer_nonce = pv1_test_login($reviewer_id);
+$cross_owner_approval = pv1_test_request('POST', '/publication-v1/v1/approve', array(
     'id' => $input['operation_id'], 'digest' => $digest, 'decision' => 'approve',
-), $nonce);
+), $reviewer_nonce);
+$owner_nonce = pv1_test_login($publisher_id);
+$missing_nonce_approval = pv1_test_request('POST', '/publication-v1/v1/approve', array(
+    'id' => $input['operation_id'], 'digest' => $digest, 'decision' => 'approve',
+));
+$_COOKIE = array();
+wp_set_current_user($publisher_id);
+$missing_cookie_approval = pv1_test_request('POST', '/publication-v1/v1/approve', array(
+    'id' => $input['operation_id'], 'digest' => $digest, 'decision' => 'approve',
+), $owner_nonce);
+$nonce = pv1_test_login($publisher_id);
 $_COOKIE = array();
 wp_set_current_user(0);
 $asset_path = 'assets/images/' . $input['image_sha256'] . '.png';
@@ -204,14 +215,15 @@ echo json_encode(array(
     'private_package_bytes_exact' => $package_bytes_exact,
     'private_package_owner_exact' => $package_owner_exact,
     'lifecycle_attempted' => true,
-    'simulated_approval' => true,
-    'actors_distinct' => $publisher_id !== $reviewer_id,
+    'publisher_id' => $publisher_id,
+    'other_owner_id' => $reviewer_id,
     'core_rest_bypass_status' => $core_bypass['status'],
     'operation_create_status' => $create['status'],
     'operation_pending_in_sqlite' => is_array($pending) && ($pending['state'] ?? '') === 'pending',
     'unapproved_commit_status' => $unapproved['status'],
-    'self_approval_status' => $self_approve['status'],
-    'self_approval_code' => $self_approve['data']['code'] ?? null,
+    'cross_owner_approval_status' => $cross_owner_approval['status'],
+    'missing_nonce_approval_status' => $missing_nonce_approval['status'],
+    'missing_cookie_approval_status' => $missing_cookie_approval['status'],
     'precommit_anonymous_resource_status' => $anonymous_resource['status'],
     'real_kses_filter_calls' => $GLOBALS['pubv1_kses_calls'],
     'real_the_content_filter_calls' => $GLOBALS['pubv1_content_calls'],
@@ -220,13 +232,11 @@ echo json_encode(array(
 
 APPROVE_BODY = r'''
 $publisher = get_user_by('login', $input['publisher_login']);
-$reviewer = get_user_by('login', $input['reviewer_login']);
 $publisher_id = $publisher ? (int) $publisher->ID : 0;
-$reviewer_id = $reviewer ? (int) $reviewer->ID : 0;
 $option_key = pubv1_option_key($input['operation_id']);
 $pending = maybe_unserialize(pubv1_read_raw_option($option_key));
 $digest = is_array($pending) ? ($pending['digest'] ?? '') : '';
-$nonce = pv1_test_login($reviewer_id);
+$nonce = pv1_test_login($publisher_id);
 $approval = pv1_test_request('POST', '/publication-v1/v1/approve', array(
     'id' => $input['operation_id'],
     'digest' => $digest,
@@ -242,17 +252,16 @@ $loaded = pubv1_load_package($input['package_id']);
 $expected = $loaded['_inventory_bytes'][$asset_path] ?? false;
 echo json_encode(array(
     'stage' => 'approve',
-    'reviewer_approval_status' => $approval['status'],
-    'reviewer_recorded_distinctly' => is_array($record)
-        && ($record['state'] ?? '') === 'approved'
-        && (int) ($record['reviewer_id'] ?? 0) === $reviewer_id
-        && (int) ($record['snapshot']['publisher_id'] ?? 0) === $publisher_id,
-    'reviewer_resource_status' => $resource['status'],
-    'reviewer_resource_private' => isset($data['_publication_v1_public']) && $data['_publication_v1_public'] === false,
-    'reviewer_resource_exact_bytes' => is_string($bytes) && is_string($expected) && hash_equals($expected, $bytes),
-    'reviewer_resource_mime' => $data['_publication_v1_mime'] ?? null,
-    'reviewer_resource_bytes' => is_string($bytes) ? strlen($bytes) : null,
-    'reviewer_resource_sha256' => is_string($bytes) ? hash('sha256', $bytes) : null,
+    'owner_approval_status' => $approval['status'],
+    'recorded_approval_owner_id' => is_array($record) ? (int) ($record['reviewer_id'] ?? 0) : 0,
+    'snapshot_owner_id' => is_array($record) ? (int) ($record['snapshot']['publisher_id'] ?? 0) : 0,
+    'operation_state' => is_array($record) ? ($record['state'] ?? null) : null,
+    'owner_resource_status' => $resource['status'],
+    'owner_resource_private' => isset($data['_publication_v1_public']) && $data['_publication_v1_public'] === false,
+    'owner_resource_exact_bytes' => is_string($bytes) && is_string($expected) && hash_equals($expected, $bytes),
+    'owner_resource_mime' => $data['_publication_v1_mime'] ?? null,
+    'owner_resource_bytes' => is_string($bytes) ? strlen($bytes) : null,
+    'owner_resource_sha256' => is_string($bytes) ? hash('sha256', $bytes) : null,
     'real_kses_filter_calls' => $GLOBALS['pubv1_kses_calls'],
     'real_the_content_filter_calls' => $GLOBALS['pubv1_content_calls'],
 ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -307,7 +316,7 @@ $record_exact = is_array($raw_record)
     && ($raw_record['state'] ?? '') === 'committed'
     && (int) ($raw_record['post_id'] ?? 0) === $post_id
     && (int) ($raw_record['snapshot']['publisher_id'] ?? 0) === $publisher_id
-    && (int) ($raw_record['reviewer_id'] ?? 0) === $reviewer_id;
+    && (int) ($raw_record['reviewer_id'] ?? 0) === $publisher_id;
 $core_exact = $core_readback['status'] === 200
     && (int) ($core_readback['data']['id'] ?? 0) === $post_id
     && ($core_readback['data']['status'] ?? '') === 'publish'
@@ -373,7 +382,7 @@ $record_exact = is_array($record)
     && ($record['state'] ?? '') === 'committed'
     && (int) ($record['post_id'] ?? 0) === $post_id
     && (int) ($record['snapshot']['publisher_id'] ?? 0) === $publisher_id
-    && (int) ($record['reviewer_id'] ?? 0) === $reviewer_id;
+    && (int) ($record['reviewer_id'] ?? 0) === $publisher_id;
 $core_exact = $core_readback['status'] === 200
     && (int) ($core_readback['data']['id'] ?? 0) === $post_id
     && ($core_readback['data']['status'] ?? '') === 'publish'
@@ -404,7 +413,7 @@ def stage_code(body: str, payload: dict) -> str:
 
 
 class RealWordPressPublicationLifecycleTests(unittest.TestCase):
-    def test_simulated_reviewer_publication_lifecycle_uses_fresh_sqlite_requests(self) -> None:
+    def test_simulated_owner_approval_publication_lifecycle_uses_fresh_sqlite_requests(self) -> None:
         RUNTIME_HOME.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="lifecycle-", dir=RUNTIME_HOME) as tmp:
             root = Path(tmp)
@@ -458,23 +467,27 @@ class RealWordPressPublicationLifecycleTests(unittest.TestCase):
                 + json.dumps(summary, ensure_ascii=False, sort_keys=True),
             )
             self.assertTrue(prepare["lifecycle_attempted"], summary)
-            self.assertTrue(prepare["simulated_approval"], summary)
-            self.assertTrue(prepare["actors_distinct"], summary)
+            self.assertGreater(prepare["publisher_id"], 0, summary)
+            self.assertGreater(prepare["other_owner_id"], 0, summary)
+            self.assertNotEqual(prepare["publisher_id"], prepare["other_owner_id"], summary)
             self.assertIn(prepare["core_rest_bypass_status"], (401, 403), summary)
             self.assertEqual(prepare["operation_create_status"], 201, summary)
             self.assertTrue(prepare["operation_pending_in_sqlite"], summary)
             self.assertEqual(prepare["unapproved_commit_status"], 409, summary)
-            self.assertEqual(prepare["self_approval_status"], 403, summary)
-            self.assertEqual(prepare["self_approval_code"], "publisher_cannot_self_approve", summary)
+            self.assertEqual(prepare["cross_owner_approval_status"], 403, summary)
+            self.assertEqual(prepare["missing_nonce_approval_status"], 403, summary)
+            self.assertEqual(prepare["missing_cookie_approval_status"], 403, summary)
             self.assertEqual(prepare["precommit_anonymous_resource_status"], 404, summary)
-            self.assertEqual(approve["reviewer_approval_status"], 200, summary)
-            self.assertTrue(approve["reviewer_recorded_distinctly"], summary)
-            self.assertEqual(approve["reviewer_resource_status"], 200, summary)
-            self.assertTrue(approve["reviewer_resource_private"], summary)
-            self.assertTrue(approve["reviewer_resource_exact_bytes"], summary)
-            self.assertEqual(approve["reviewer_resource_mime"], "image/png", summary)
-            self.assertEqual(approve["reviewer_resource_bytes"], len(png_fixture()), summary)
-            self.assertEqual(approve["reviewer_resource_sha256"], case["image_sha256"], summary)
+            self.assertEqual(approve["owner_approval_status"], 200, summary)
+            self.assertEqual(approve["operation_state"], "approved", summary)
+            self.assertEqual(approve["recorded_approval_owner_id"], prepare["publisher_id"], summary)
+            self.assertEqual(approve["snapshot_owner_id"], prepare["publisher_id"], summary)
+            self.assertEqual(approve["owner_resource_status"], 200, summary)
+            self.assertTrue(approve["owner_resource_private"], summary)
+            self.assertTrue(approve["owner_resource_exact_bytes"], summary)
+            self.assertEqual(approve["owner_resource_mime"], "image/png", summary)
+            self.assertEqual(approve["owner_resource_bytes"], len(png_fixture()), summary)
+            self.assertEqual(approve["owner_resource_sha256"], case["image_sha256"], summary)
             self.assertEqual(commit["commit_status"], 200, summary)
             self.assertEqual(commit["same_operation_retry_status"], 200, summary)
             self.assertTrue(commit["same_post_on_retry"], summary)
