@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
-const input = JSON.parse(Buffer.from(process.argv[2], 'base64').toString('utf8'));
+const input = JSON.parse(Buffer.from(process.argv[2] === '-' ? fs.readFileSync(0, 'utf8') : process.argv[2], 'base64').toString('utf8'));
 if (!/^[0-9a-f]{32}$/.test(input.runId)) throw new Error('invalid isolated run id');
 if (!/^[0-9a-f]{64}$/.test(input.compilerSha256)) throw new Error('invalid compiler digest');
 const [{ PHP, PHPRequestHandler, loadPHPRuntime }, php83, { bootWordPress }] = await Promise.all([

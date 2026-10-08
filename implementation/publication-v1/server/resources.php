@@ -53,7 +53,7 @@ function pubv1_resource_callback($request) {
         }
     } else {
         $reviewer_id = pubv1_reviewer_cookie_user();
-        if (!$reviewer_id || (int) $reviewer_id === (int) $s['publisher_id'] || (int) ($s['expires_at'] ?? 0) <= time() || !in_array($record['state'] ?? '', array('pending', 'approved'), true)) {
+        if (!$reviewer_id || (int) $reviewer_id !== (int) $s['publisher_id'] || (int) ($s['expires_at'] ?? 0) <= time() || !in_array($record['state'] ?? '', array('pending', 'approved'), true)) {
             return pubv1_error('resource_unavailable', 404);
         }
         if (!pubv1_current($record)) {

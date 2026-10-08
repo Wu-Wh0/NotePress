@@ -58,11 +58,14 @@ function phpJson(code, label) {
   return php.run({ code }).then(response => jsonOutput(response, label));
 }
 async function wpRequest(method, route, body, actor = 'publisher') {
-  const session = actor === 'reviewer' ? identities.reviewer : actor === 'otherPublisher' ? identities.otherPublisher : actor === 'publisher' ? identities.publisher : null;
+  const session = actor === 'reviewer' ? identities.reviewer
+    : actor === 'otherPublisher' ? identities.otherPublisher
+    : ['publisher', 'publisherNoNonce', 'publisherNoCookie'].includes(actor) ? identities.publisher
+    : null;
   const headers = { accept: 'application/json' };
   if (session) {
-    headers.cookie = session.cookie;
-    headers['x-wp-nonce'] = session.nonce;
+    if (actor !== 'publisherNoCookie') headers.cookie = session.cookie;
+    if (actor !== 'publisherNoNonce') headers['x-wp-nonce'] = session.nonce;
   }
   if (body !== undefined) headers['content-type'] = 'application/json';
   const response = await handler.request({
@@ -121,10 +124,11 @@ try {
 
   identities = await phpJson(`<?php
     require_once '${sitePath}/wp-load.php';
-    function pv1_session_create_actor($login, $capability) {
+    function pv1_session_create_actor($login, $capabilities) {
       $user_id = wp_insert_user(array('user_login' => $login, 'user_email' => $login . '@example.test', 'user_pass' => wp_generate_password(48, true, true), 'role' => 'subscriber'));
       if (is_wp_error($user_id)) throw new RuntimeException('synthetic actor creation failed');
-      (new WP_User($user_id))->add_cap($capability);
+      $user = new WP_User($user_id);
+      foreach ($capabilities as $capability) $user->add_cap($capability);
       $expires = time() + HOUR_IN_SECONDS;
       $token = WP_Session_Tokens::get_instance($user_id)->create($expires);
       $cookie = wp_generate_auth_cookie($user_id, $expires, 'logged_in', $token);
@@ -132,9 +136,9 @@ try {
       wp_set_current_user($user_id);
       return array('id' => (int) $user_id, 'cookie' => LOGGED_IN_COOKIE . '=' . $cookie, 'nonce' => wp_create_nonce('wp_rest'));
     }
-    $publisher = pv1_session_create_actor('synthetic-publisher-${input.runId}', 'publish_publication_v1');
-    $reviewer = pv1_session_create_actor('synthetic-reviewer-${input.runId}', 'approve_publication_v1');
-    $other_publisher = pv1_session_create_actor('synthetic-other-publisher-${input.runId}', 'publish_publication_v1');
+    $publisher = pv1_session_create_actor('synthetic-publisher-${input.runId}', array('publish_publication_v1', 'approve_publication_v1'));
+    $reviewer = pv1_session_create_actor('synthetic-reviewer-${input.runId}', array('approve_publication_v1'));
+    $other_publisher = pv1_session_create_actor('synthetic-other-publisher-${input.runId}', array('publish_publication_v1', 'approve_publication_v1'));
     echo json_encode(array('publisher' => $publisher, 'reviewer' => $reviewer, 'otherPublisher' => $other_publisher));
   `, 'synthetic actor setup');
   if (!identities.publisher?.id || !identities.reviewer?.id || !identities.otherPublisher?.id
@@ -159,11 +163,15 @@ try {
       const control = req.headers['x-test-harness'] === controlToken;
       const publisher = req.headers['x-test-publisher'] === publisherToken;
       const route = req.url || '/';
-      if (route === '/__test__/simulated-reviewer-approval' && req.method === 'POST' && control) {
+      if (route === '/__test__/simulated-owner-approval' && req.method === 'POST' && control) {
         const value = JSON.parse(body.toString('utf8'));
-        const result = await wpRequest('POST', '/wp-json/publication-v1/v1/approve', { id: value.id, digest: value.digest, decision: 'approve' }, 'reviewer');
+        const reviewBody = { id: value.id, digest: value.digest, decision: 'approve' };
+        const crossOwner = await wpRequest('POST', '/wp-json/publication-v1/v1/approve', reviewBody, 'reviewer');
+        const missingNonce = await wpRequest('POST', '/wp-json/publication-v1/v1/approve', reviewBody, 'publisherNoNonce');
+        const missingCookie = await wpRequest('POST', '/wp-json/publication-v1/v1/approve', reviewBody, 'publisherNoCookie');
+        const result = await wpRequest('POST', '/wp-json/publication-v1/v1/approve', reviewBody, 'publisher');
         res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
-        res.end(JSON.stringify({ SIMULATED: true, status: result.status, response: result.text }));
+        res.end(JSON.stringify({ SIMULATED: true, cross_owner_status: crossOwner.status, missing_nonce_status: missingNonce.status, missing_cookie_status: missingCookie.status, status: result.status, response: result.text }));
         return;
       }
       if (route === '/__test__/unapproved-commit-probe' && req.method === 'POST' && control) {
@@ -285,7 +293,7 @@ try {
           $post_id = is_array($record) ? (int) ($record['post_id'] ?? 0) : 0;
           $post = $post_id ? get_post($post_id) : false;
           $count = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value = %s", '_publication_v1_operation', '${value.operation_id}'));
-          echo json_encode(array('state' => is_array($record) ? ($record['state'] ?? null) : null, 'post_id' => $post_id, 'db_exact' => $post instanceof WP_Post && $post->post_type === 'post' && $post->post_status === 'publish' && (int) $post->post_author === ${identities.publisher.id} && $post->post_title === '${value.title_php}' && $post->post_content === ($record['snapshot']['content'] ?? null), 'snapshot_rendered' => is_array($record) ? ($record['snapshot']['rendered'] ?? null) : null, 'one_post' => $count === 1, 'reviewer_distinct' => is_array($record) && (int) ($record['reviewer_id'] ?? 0) === ${identities.reviewer.id} && ${identities.publisher.id} !== ${identities.reviewer.id}));
+          echo json_encode(array('state' => is_array($record) ? ($record['state'] ?? null) : null, 'post_id' => $post_id, 'db_exact' => $post instanceof WP_Post && $post->post_type === 'post' && $post->post_status === 'publish' && (int) $post->post_author === ${identities.publisher.id} && $post->post_title === '${value.title_php}' && $post->post_content === ($record['snapshot']['content'] ?? null), 'snapshot_rendered' => is_array($record) ? ($record['snapshot']['rendered'] ?? null) : null, 'one_post' => $count === 1, 'operation_owner_id' => is_array($record) ? (int) ($record['snapshot']['publisher_id'] ?? 0) : 0, 'recorded_approval_owner_id' => is_array($record) ? (int) ($record['reviewer_id'] ?? 0) : 0));
         `, 'database publication readback');
         const core = await wpRequest('GET', `/wp-json/wp/v2/posts/${pre.post_id}`, undefined, 'anonymous');
         const assetPath = `/wp-json/publication-v1/v1/resources/${value.operation_id}/assets/images/${value.image_sha256}.png`;

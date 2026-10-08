@@ -61,7 +61,7 @@ class PublicationV1SourceBoundaryTests(unittest.TestCase):
                 self.assertIn(marker, combined)
         self.assertRegex(combined, r"BLOG_V1_COMPILER_SHA256.{0,500}hash_equals|hash_equals.{0,500}BLOG_V1_COMPILER_SHA256")
 
-    def test_reviewer_approval_uses_native_cookie_nonce_and_separation(self) -> None:
+    def test_owner_approval_uses_native_cookie_nonce_and_owner_binding(self) -> None:
         combined = "\n".join(product_php().values())
         for marker in (
             "wp_validate_auth_cookie",
@@ -73,7 +73,13 @@ class PublicationV1SourceBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, combined)
-        self.assertRegex(combined, r"reviewer_id.{0,240}(?:!==|!=).{0,80}publisher_id|publisher_id.{0,240}(?:!==|!=).{0,80}reviewer_id|if\s*\(\s*\$reviewer_id\s*===\s*\$publisher_id\s*\)")
+        workflow = (SERVER / "workflow.php").read_text(encoding="utf-8")
+        permission = workflow.split("function pubv1_reviewer_permission", 1)[1].split("function pubv1_request_body", 1)[0]
+        approval = workflow.split("function pubv1_approve_callback", 1)[1].split("function pubv1_commit_callback", 1)[0]
+        self.assertIn("wp_validate_auth_cookie", permission)
+        self.assertIn("wp_verify_nonce($nonce, 'wp_rest')", permission)
+        self.assertRegex(approval, r"\$reviewer_id\s*!==\s*\$publisher_id")
+        self.assertRegex(approval, r"\$record\['reviewer_id'\]\s*=\s*\$reviewer_id")
         self.assertRegex(combined, r"decision.{0,300}approve|approve.{0,300}decision")
 
     def test_owner_scoped_state_uses_compare_and_swap_and_only_inserts_new_posts(self) -> None:

@@ -263,8 +263,8 @@ function pubv1_approve_callback($request) {
     }
     $publisher_id = (int) ($record['snapshot']['publisher_id'] ?? 0);
     $reviewer_id = (int) get_current_user_id();
-    if ($reviewer_id === $publisher_id) {
-        return pubv1_error('publisher_cannot_self_approve', 403);
+    if ($publisher_id < 1 || $reviewer_id !== $publisher_id) {
+        return pubv1_error('object_forbidden', 403);
     }
     if (($record['state'] ?? '') !== 'pending' || (int) ($record['snapshot']['expires_at'] ?? 0) <= time() || !pubv1_current($record)) {
         return pubv1_error('approval_unavailable', 409);
@@ -310,7 +310,7 @@ function pubv1_commit_callback($request) {
     if (($record['state'] ?? '') === 'committing') {
         return pubv1_error('commit_in_progress', 409);
     }
-    if (($record['state'] ?? '') !== 'approved' || (int) ($s['expires_at'] ?? 0) <= time() || (int) ($record['reviewer_id'] ?? 0) < 1 || (int) $record['reviewer_id'] === (int) $s['publisher_id'] || !pubv1_current($record)) {
+    if (($record['state'] ?? '') !== 'approved' || (int) ($s['expires_at'] ?? 0) <= time() || (int) ($record['reviewer_id'] ?? 0) < 1 || (int) $record['reviewer_id'] !== (int) $s['publisher_id'] || !pubv1_current($record)) {
         return pubv1_error('not_approved_or_changed', 409);
     }
     if ($wpdb->query('START TRANSACTION') === false) {
@@ -377,7 +377,7 @@ function pubv1_preview_page() {
     }
     $reviewer_id = pubv1_reviewer_cookie_user();
     $record = get_option(pubv1_option_key($operation_id));
-    if (!$reviewer_id || !is_array($record) || !is_array($record['snapshot'] ?? null) || (int) $reviewer_id === (int) $record['snapshot']['publisher_id']) {
+    if (!$reviewer_id || !is_array($record) || !is_array($record['snapshot'] ?? null) || (int) $reviewer_id !== (int) $record['snapshot']['publisher_id']) {
         status_header(403);
         exit;
     }
@@ -392,24 +392,24 @@ function pubv1_preview_page() {
     header('X-Frame-Options: DENY');
     header('Referrer-Policy: same-origin');
     header("Content-Security-Policy: default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
-    echo '<!doctype html><html><head><meta charset="utf-8"><title>' . esc_html($s['title']) . '</title>';
+    echo '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>' . esc_html($s['title']) . '</title>';
     foreach ($s['inventory'] as $path => $asset) {
         if (($asset['mime'] ?? '') === 'text/css') {
             echo '<link rel="stylesheet" href="' . esc_url(pubv1_resource_url($operation_id, $path)) . '">';
         }
     }
-    echo '</head><body><h1>Private publication-v1 review; nothing is published until the publisher commits.</h1>';
-    echo '<p>State: ' . esc_html($record['state']) . '; publisher: ' . (int) $s['publisher_id'] . '; digest: ' . esc_html($record['digest']) . '</p>';
-    echo '<article><h2>' . esc_html($s['title']) . '</h2>' . wp_kses_post($s['rendered']) . '</article>';
+    echo '</head><body><h1>' . esc_html($s['title']) . '</h1>';
+    echo '<p>确认后仍需回到插件点击发布。</p>';
+    echo '<article>' . wp_kses_post($s['rendered']) . '</article>';
     if ($record['state'] === 'pending') {
         echo '<form method="post" action="' . esc_url(rest_url('publication-v1/v1/approve')) . '">';
         echo '<input type="hidden" name="id" value="' . esc_attr($operation_id) . '">';
         echo '<input type="hidden" name="digest" value="' . esc_attr($record['digest']) . '">';
         echo '<input type="hidden" name="_wpnonce" value="' . esc_attr(wp_create_nonce('wp_rest')) . '">';
-        echo '<button type="submit" name="decision" value="approve">Approve frozen draft</button>';
-        echo '<button type="submit" name="decision" value="cancel">Cancel without publishing</button></form>';
+        echo '<button type="submit" name="decision" value="approve">确认</button>';
+        echo '<button type="submit" name="decision" value="cancel">取消</button></form>';
     } else {
-        echo '<p>Approved; publisher commit is still required.</p>';
+        echo '<p>已确认，尚未发布。</p>';
     }
     echo '</body></html>';
     exit;

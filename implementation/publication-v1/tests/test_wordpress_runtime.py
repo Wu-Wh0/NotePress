@@ -139,7 +139,9 @@ def run_isolated_wordpress(cases: list[dict], php_code: str | list[str]) -> tupl
     runner = ROOT / "tests" / "wp-runtime-v1" / "wp-harness.mjs"
     env = dict(os.environ)
     proc = subprocess.run(
-        [str(NODE), str(runner), encoded],
+        [str(NODE), str(runner), "-"],
+        input=encoded,
+        encoding="utf-8",
         capture_output=True,
         text=True,
         check=False,
