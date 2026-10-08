@@ -56,35 +56,51 @@ function pubv1_title_valid($title) {
 }
 
 function pubv1_compiler_valid($compiler) {
-    if (!is_array($compiler) || count($compiler) !== 2 || array_diff(array_keys($compiler), array('files', 'toolchain'))) {
+    if (!is_array($compiler)) {
         return false;
     }
-    $files = $compiler['files'] ?? null;
-    $expected_files = array('package_builder.py', 'reader.py', 'render.cjs');
-    if (!is_array($files) || count($files) !== count($expected_files)) {
-        return false;
-    }
-    $file_names = array_keys($files);
-    sort($file_names, SORT_STRING);
-    sort($expected_files, SORT_STRING);
-    if ($file_names !== $expected_files) {
-        return false;
-    }
-    foreach ($files as $digest) {
-        if (!pubv1_hex($digest)) {
+    $compiler_keys = array_keys($compiler);
+    sort($compiler_keys, SORT_STRING);
+    $desktop_keys = array('bundle_sha256', 'id', 'katex', 'markdown_it');
+    sort($desktop_keys, SORT_STRING);
+    if ($compiler_keys === $desktop_keys) {
+        if (($compiler['id'] ?? null) !== 'blog-publisher-local-js'
+            || ($compiler['markdown_it'] ?? null) !== '14.1.0'
+            || ($compiler['katex'] ?? null) !== '0.16.22'
+            || !pubv1_hex($compiler['bundle_sha256'] ?? null)) {
             return false;
         }
-    }
-    $toolchain = $compiler['toolchain'] ?? null;
-    $expected_toolchain = array('dependency_manifest_sha256', 'katex', 'markdown_it', 'node', 'package_lock_sha256');
-    if (!is_array($toolchain) || count($toolchain) !== count($expected_toolchain)) {
-        return false;
-    }
-    $toolchain_names = array_keys($toolchain);
-    sort($toolchain_names, SORT_STRING);
-    sort($expected_toolchain, SORT_STRING);
-    if ($toolchain_names !== $expected_toolchain || !preg_match('~^v[0-9]+[.][0-9]+[.][0-9]+$~D', $toolchain['node'] ?? '') || !is_string($toolchain['markdown_it'] ?? null) || $toolchain['markdown_it'] === '' || !is_string($toolchain['katex'] ?? null) || $toolchain['katex'] === '' || !pubv1_hex($toolchain['dependency_manifest_sha256'] ?? null) || !pubv1_hex($toolchain['package_lock_sha256'] ?? null)) {
-        return false;
+    } else {
+        if (count($compiler) !== 2 || array_diff(array_keys($compiler), array('files', 'toolchain'))) {
+            return false;
+        }
+        $files = $compiler['files'] ?? null;
+        $expected_files = array('package_builder.py', 'reader.py', 'render.cjs');
+        if (!is_array($files) || count($files) !== count($expected_files)) {
+            return false;
+        }
+        $file_names = array_keys($files);
+        sort($file_names, SORT_STRING);
+        sort($expected_files, SORT_STRING);
+        if ($file_names !== $expected_files) {
+            return false;
+        }
+        foreach ($files as $digest) {
+            if (!pubv1_hex($digest)) {
+                return false;
+            }
+        }
+        $toolchain = $compiler['toolchain'] ?? null;
+        $expected_toolchain = array('dependency_manifest_sha256', 'katex', 'markdown_it', 'node', 'package_lock_sha256');
+        if (!is_array($toolchain) || count($toolchain) !== count($expected_toolchain)) {
+            return false;
+        }
+        $toolchain_names = array_keys($toolchain);
+        sort($toolchain_names, SORT_STRING);
+        sort($expected_toolchain, SORT_STRING);
+        if ($toolchain_names !== $expected_toolchain || !preg_match('~^v[0-9]+[.][0-9]+[.][0-9]+$~D', $toolchain['node'] ?? '') || !is_string($toolchain['markdown_it'] ?? null) || $toolchain['markdown_it'] === '' || !is_string($toolchain['katex'] ?? null) || $toolchain['katex'] === '' || !pubv1_hex($toolchain['dependency_manifest_sha256'] ?? null) || !pubv1_hex($toolchain['package_lock_sha256'] ?? null)) {
+            return false;
+        }
     }
     $canonical = pubv1_canonical_json($compiler);
     return defined('BLOG_V1_COMPILER_SHA256') && pubv1_hex(BLOG_V1_COMPILER_SHA256) && is_string($canonical) && hash_equals(BLOG_V1_COMPILER_SHA256, hash('sha256', $canonical));
