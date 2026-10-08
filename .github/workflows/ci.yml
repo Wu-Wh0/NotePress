@@ -1,6 +1,9 @@
 name: Publication fast checks
 on:
   pull_request:
+    paths:
+      - 'implementation/publication-v1/**'
+      - '.github/workflows/ci.yml'
   workflow_dispatch:
     inputs:
       full-wordpress:

@@ -4,7 +4,8 @@
   "private": true,
   "description": "Desktop Obsidian publishing through native WordPress REST; no custom server plugin.",
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "build": "node build.mjs"
   },
   "dependencies": {
     "markdown-it": "14.1.0",

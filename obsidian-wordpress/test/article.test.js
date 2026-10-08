@@ -157,3 +157,16 @@ test('provides publication body separately from preview wrapper and title', () =
   assert.match(result.html, /article-title/);
   assert.doesNotMatch(result.bodyHtml, /标题只用于预览|article-title|<article>/);
 });
+
+test('hidden Obsidian comments block publication and reference collection without exposing their contents', () => {
+  for (const source of ['公开 %%INTERNAL_ONLY%%', '%%\n![[Private/secret.png]]\n%%']) {
+    const result = require('../src/article').renderArticle({ source, title: '文章' });
+    assert.equal(result.blocked, true);
+    assert.equal(result.html, '');
+    assert.throws(() => extractImageReferences(source), { message: 'unsupported_hidden_comment' });
+    assert.doesNotMatch(JSON.stringify(result), /INTERNAL_ONLY|Private|secret\.png/);
+  }
+  const code = require('../src/article').renderArticle({ source: '`%%literal%%`', title: '文章' });
+  assert.equal(code.blocked, false);
+  assert.match(code.bodyHtml, /<code>%%literal%%<\/code>/);
+});

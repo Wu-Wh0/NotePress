@@ -249,6 +249,10 @@ function parseArticle(source) {
   for (const block of tokens) {
     if (block.type !== 'inline' || !block.children) continue;
     for (const token of block.children) {
+      // Obsidian hides comments; do not publish their text or read their attachments.
+      // Keep literal comment delimiters in code samples unchanged.
+      if (['text', 'image', 'article_image', 'article_wikilink'].includes(token.type)
+          && token.content.includes('%%')) throw new Error('unsupported_hidden_comment');
       if (token.type === 'article_note_embed') throw new Error('unsupported_note_embed');
       if (!['image', 'article_image'].includes(token.type)) continue;
       const details = token.meta?.sourcePath ? token.meta : normalizeTarget(token.attrGet('src') || '');
