@@ -141,6 +141,25 @@ test('fails closed on unterminated frontmatter instead of exposing metadata', ()
   assert.equal(result.html, '');
 });
 
+test('publishes self-contained native MathML while keeping styled KaTeX in local preview', () => {
+  const result = require('../src/article').renderArticle({
+    source: '行内 $x^2 + \\frac{a}{b}$。\n\n$$\n\\sqrt{x} + \\sum_{n=1}^{10}n\n$$',
+    title: '原生公式',
+  });
+  assert.equal(result.blocked, false);
+  assert.match(result.html, /class="katex-html"/);
+  assert.match(result.bodyHtml, /<math>/);
+  assert.match(result.bodyHtml, /<math display="block">/);
+  assert.match(result.bodyHtml, /<mfrac>/);
+  assert.match(result.bodyHtml, /<msqrt>/);
+  assert.match(result.bodyHtml, /<annotation encoding="application\/x-tex">/);
+  assert.doesNotMatch(result.bodyHtml, /katex-html|katex-mathml|style=|xmlns=|<script|<link/);
+  const oversized = require('../src/article').renderArticle({ source: Array(65).fill('$x$').join(' '), title: '公式额度' });
+  assert.equal(oversized.blocked, true);
+  assert.equal(oversized.html, '');
+  assert.equal(oversized.bodyHtml, undefined);
+});
+
 test('blocks actual Dataview inline-code expressions, including JavaScript expressions', () => {
   for (const source of ['作者: `= this.file.name`', '`$=dv.current().private`', '`= 1 + 1`']) {
     const result = require('../src/article').renderArticle({ source, title: '文章' });

@@ -16,6 +16,7 @@ Do not use a primary vault or production site for candidate acceptance.
 ## Supported boundary
 
 - Markdown paragraphs, headings, lists, tables, code and bounded KaTeX expressions; Obsidian image embeds and Markdown images. Note properties are excluded from publication. Preview title/wrapper and publication body are separate.
+- Local formulas keep the bundled KaTeX styling/fonts. Published formulas use native MathML without site-side JavaScript, CSS or a custom WordPress plugin; modern browsers render them directly. Typography can differ from the preview. A WordPress version or filter that removes formula content leaves a mismatching draft blocked instead of silently publishing it.
 - Wikilinks become visibly marked display text, not exported note contents or vault paths. Non-image note embeds, dynamic plugin queries, raw HTML and hidden Obsidian comments block publication. Literal comment delimiters inside code samples remain literal.
 - Only referenced images are read. Basename references must match the configured attachment location; path-qualified references must match the resolver's exact target. Unresolved or ambiguous paths block publication. Remote images are not downloaded. The sandboxed preview does not load external resources; formula fonts are included offline.
 - Confirmed articles are updated using the same recorded remote ID. Remote changes block overwrite. A durable journal stores hashes, IDs and safe URLs, not article bodies or credentials. Note identity currently follows its vault-relative path: rename/move reconciliation is not implemented.
@@ -26,7 +27,7 @@ Do not use a primary vault or production site for candidate acceptance.
 
 Install locked dependencies separately on each operating system with `npm ci --ignore-scripts --no-audit --no-fund`, then run `npm test` and `npm run build`. The deterministic install ZIP contains only the three installation files. KaTeX fonts are embedded in the bundle; Obsidian and Node built-ins remain host-provided.
 
-Tests require Node.js with `node:test` and OpenSSL for loopback TLS fixtures. `OPENSSL_BIN` can select OpenSSL; `WORDPRESS_TEST_SCRATCH` can select transport fixture storage; other disposable fixtures use `TMPDIR` or the platform temporary directory. Do not commit dependencies, certificates, databases, credentials, generated install files or private runtime evidence.
+Tests require Node.js with `node:test`, Git for checkout-attribute verification and OpenSSL for loopback TLS fixtures. `OPENSSL_BIN` can select OpenSSL; `WORDPRESS_TEST_SCRATCH` can select transport fixture storage; other disposable fixtures use `TMPDIR` or the platform temporary directory. Do not commit dependencies, certificates, databases, credentials, generated install files or private runtime evidence.
 
 ## Modules and evidence
 

@@ -36,7 +36,7 @@ function renderImageToken(tokens, index) {
   return `<img src="${escapeHtml(token.attrGet('src') || '')}" alt="${escapeHtml(token.content || '')}"${width}${height}>`;
 }
 
-function createMarkdown() {
+function createMarkdown(mathOutput = 'htmlAndMathml') {
   const md = new MarkdownIt({ html: false, linkify: false, typographer: false, maxNesting: 20 });
   md.validateLink = () => true;
   md.renderer.rules.image = renderImageToken;
@@ -47,9 +47,12 @@ function createMarkdown() {
     const blockedCommands = ['href', 'url', 'html', 'includegraphics', 'def', 'gdef', 'newcommand', 'require'];
     const hasBlockedCommand = blockedCommands.some(command => source.includes(String.fromCharCode(92) + command));
     if (source.length > 10000 || mathCount >= 64 || source.includes('%') || hasBlockedCommand) throw new Error('unsupported_math');
-    const rendered = katex.renderToString(source, {
-      displayMode: display, output: 'htmlAndMathml', throwOnError: true, trust: false, strict: 'error', maxExpand: 1000,
+    let rendered = katex.renderToString(source, {
+      displayMode: display, output: mathOutput, throwOnError: true, trust: false, strict: 'error', maxExpand: 1000,
     });
+    // HTML parsing assigns <math> its namespace; WordPress strips redundant xmlns.
+    // Remove it only from generated MathML, never normalize a remote readback.
+    if (mathOutput === 'mathml') rendered = rendered.replace(' xmlns="http://www.w3.org/1998/Math/MathML"', '');
     mathCount += 1;
     mathBytes += Buffer.byteLength(rendered, 'utf8');
     if (rendered.includes('katex-error') || mathBytes > 500000) throw new Error('math_render_failed');
@@ -218,16 +221,19 @@ function renderArticle({ source, title, assetUrls = {} } = {}) {
   }
   const safeTitle = escapeHtml(title.trim());
   let body;
+  let publicationBody;
   try {
     body = parsed.md.renderer.render(parsed.tokens, parsed.md.options, {});
+    const publication = createMarkdown('mathml');
+    publicationBody = publication.renderer.render(parsed.tokens, publication.options, {});
   } catch {
     return { html: '', headings: [], conversions: [], references: parsed.references, blocked: true, issues: [{ code: 'render_failed' }] };
   }
   const html = `<article><h1 class="article-title">${safeTitle}</h1>${body}</article>`;
-  if (Buffer.byteLength(html, 'utf8') > 1024 * 1024) {
+  if (Buffer.byteLength(html, 'utf8') > 1024 * 1024 || Buffer.byteLength(publicationBody, 'utf8') > 1024 * 1024) {
     return { html: '', headings: [], conversions: [], references: parsed.references, blocked: true, issues: [{ code: 'render_output_limit' }] };
   }
-  return { html, bodyHtml: body, headings, conversions, references: parsed.references, blocked: false, issues: [] };
+  return { html, bodyHtml: publicationBody, headings, conversions, references: parsed.references, blocked: false, issues: [] };
 }
 
 function withoutFrontmatter(source) {
