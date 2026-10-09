@@ -11,6 +11,13 @@ const { build } = require('../build.mjs');
 const root = path.resolve(__dirname, '..');
 const distRoot = path.join(root, 'dist');
 
+test('root plugin packaging inputs retain LF checkout attributes on every platform', () => {
+  const { execFileSync } = require('node:child_process');
+  const files = ['manifest.json', 'styles.css', 'package.json', 'package-lock.json', 'build.mjs', 'src/main.js', 'test/build.test.js'];
+  const output = execFileSync('git', ['check-attr', 'eol', '--', ...files], { cwd: root, encoding: 'utf8' });
+  assert.deepEqual(output.trim().split(/\r?\n/), files.map(name => `${name}: eol: lf`));
+});
+
 function crc32(bytes) {
   let crc = 0xffffffff;
   for (const byte of bytes) {

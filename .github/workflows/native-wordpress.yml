@@ -11,6 +11,7 @@ on:
       - 'versions.json'
       - 'styles.css'
       - 'README.md'
+      - '.gitattributes'
       - '.github/workflows/native-wordpress.yml'
   workflow_dispatch:
 permissions:
