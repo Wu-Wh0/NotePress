@@ -2,7 +2,7 @@ name: Publication fast checks
 on:
   pull_request:
     paths:
-      - 'implementation/publication-v1/**'
+      - 'legacy/publication-v1/**'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
     inputs:
@@ -32,7 +32,7 @@ jobs:
           node-version: '24.21.0'
           package-manager-cache: false
       - name: Boundary, plugin and mandatory PHP lint
-        working-directory: implementation/publication-v1
+        working-directory: legacy/publication-v1
         run: |
           command -v php
           python -B -m unittest discover -s tests -p test_server_boundary.py -v
@@ -53,7 +53,7 @@ jobs:
         shell: bash
         env:
           TMPDIR: ${{ runner.temp }}
-        working-directory: implementation/publication-v1
+        working-directory: legacy/publication-v1
         run: |
           command -v openssl
           npm ci --prefix desktop --no-audit --no-fund
@@ -74,4 +74,4 @@ jobs:
           node-version: '24.21.0'
           package-manager-cache: false
       - name: Full synthetic producer and WordPress regression
-        run: bash implementation/publication-v1/ci/ci-full-wordpress.sh
+        run: bash legacy/publication-v1/ci/ci-full-wordpress.sh

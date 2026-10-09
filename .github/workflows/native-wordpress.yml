@@ -2,7 +2,15 @@ name: Native WordPress plugin build
 on:
   pull_request:
     paths:
-      - 'obsidian-wordpress/**'
+      - 'src/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'build.mjs'
+      - 'manifest.json'
+      - 'versions.json'
+      - 'styles.css'
+      - 'README.md'
       - '.github/workflows/native-wordpress.yml'
   workflow_dispatch:
 permissions:
@@ -21,7 +29,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: obsidian-wordpress
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
