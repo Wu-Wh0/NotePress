@@ -13,6 +13,17 @@ This is a **buildable first-version candidate**, not a production release. Nativ
 
 Do not use a primary vault or production site for candidate acceptance.
 
+### WordPress application password
+
+An application password lets this plugin act as your WordPress author through the API: upload referenced images, publish and update articles. It is **not your website login password**, and you can revoke it separately. It uses the account's existing permissions, not a plugin-specific restricted permission set.
+
+1. In your site's WordPress dashboard, open **Users → Profile → Application Passwords** and create an entry for Obsidian. WordPress shows the generated password only once.
+2. In the plugin's **应用程序密码** selector, add that password to Obsidian's secret storage, save it and select it. The secret name is only a local label: choose any name you recognize. Adding a local secret does not generate a WordPress application password. Plugin settings save only the reference, not the password.
+3. Enter the matching HTTPS site and WordPress username, then use **测试连接**. Do not paste credentials into notes, chat, URLs or logs.
+4. To revoke access, remove this entry under the same WordPress **Application Passwords** section. Deleting an Obsidian secret alone does not revoke server access. If the WordPress section is missing, check that your version supports application passwords, the site uses HTTPS and the site administrator has not disabled them.
+
+The settings page provides this help in a short expandable section; there is no extra setup wizard or server installation.
+
 Optional **本地预览 CSS** accepts one explicit Vault-relative `.css` path (for example `styles/blog.css`); blank keeps the built-in theme. Files are limited to 128 KiB before and after reading. Custom rules follow built-in preview styles and are never added to publication HTML, uploads or receipts. Creation, changes, deletion, rename and clearing the setting refresh or fall back to built-in styling. Invalid files show a message in the preview. Resource references (`@import`, `url()`, `image-set()`), CSS escapes and `<` are deliberately unsupported; bundled offline KaTeX fonts remain available. Hidden files/folders (including `.obsidian`) are unsupported because normal Vault change events do not cover them. Linked descendants are rejected by real-path checks before the desktop adapter reads CSS; no folders are scanned.
 
 ## Supported boundary

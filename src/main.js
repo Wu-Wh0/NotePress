@@ -115,19 +115,15 @@ class BlogPreviewView extends ItemView {
   async onOpen() {
     const root = this.contentEl;
     root.empty();
-    const actions = root.createDiv({ cls: 'native-wordpress-actions' });
+    root.addClass('native-wordpress-preview');
+    const toolbar = root.createDiv({ cls: 'native-wordpress-toolbar' });
+    this.infoEl = toolbar.createDiv({ cls: 'native-wordpress-info' });
+    const actions = toolbar.createDiv({ cls: 'native-wordpress-actions' });
     this.publishButton = actions.createEl('button', { text: '发布文章', attr: { type: 'button' } });
     this.checkButton = actions.createEl('button', { text: '核对结果', attr: { type: 'button' } });
-    this.infoEl = root.createDiv({ cls: 'native-wordpress-info' });
     this.feedbackEl = root.createDiv({ cls: 'native-wordpress-feedback', attr: { 'aria-live': 'polite' } });
-    this.frame = root.createEl('iframe', { attr: { title: '博客样式预览', sandbox: '' } });
+    this.frame = root.createEl('iframe', { cls: 'native-wordpress-frame', attr: { title: '博客样式预览', sandbox: '' } });
     this.frame.setAttribute('sandbox', '');
-    if (this.frame.style) {
-      this.frame.style.width = '100%';
-      this.frame.style.height = '70vh';
-      this.frame.style.minHeight = '24rem';
-      this.frame.style.border = '0';
-    }
     this.publishButton.addEventListener('click', () => { void this.plugin.runAction('publish'); });
     this.checkButton.addEventListener('click', () => { void this.plugin.runAction('checkStatus'); });
     this.plugin.attachView(this);
@@ -156,13 +152,14 @@ class BlogPreviewView extends ItemView {
     const stateText = preview?.manualRequired ? '需人工核对' : preview?.needsCheck ? '待核对'
       : preview?.dirty ? '有未发布修改'
         : preview?.publishedLink ? '已发布' : '本地预览';
-    this.infoEl.createSpan({ text: ` · ${stateText}` });
+    this.infoEl.createSpan({ text: stateText, cls: 'native-wordpress-state' });
 
     const issueText = Array.isArray(preview?.issues) ? preview.issues.map((item) => item.message).filter(Boolean).join(' ') : '';
     this.feedbackEl.setText([issueText, this.plugin.styleMessage].filter(Boolean).join(' '));
     this.publishButton.setText(preview?.publishedLink ? '更新文章' : '发布文章');
     this.publishButton.disabled = this.busy || !preview?.canPublish || preview?.needsCheck === true;
     this.checkButton.disabled = this.busy || preview?.needsCheck !== true || preview?.manualRequired === true;
+    this.checkButton.hidden = preview?.needsCheck !== true || preview?.manualRequired === true;
     if (this.frame && preview) this.frame.srcdoc = buildFrameDocument(preview.html, localKatexCss(), this.plugin.previewImages, this.plugin.customCss);
   }
 
@@ -198,10 +195,15 @@ class BlogSettingsTab extends PluginSettingTab {
         .onChange((value) => { void this.plugin.updateSetting('username', value); }));
     new Setting(containerEl)
       .setName('应用程序密码')
-      .setDesc('使用 Obsidian 安全存储选择或创建密钥；插件设置只保存密钥引用。')
+      .setDesc('授权插件上传图片、发布文章和更新文章，不是网站登录密码。通过 Obsidian 安全存储选择已保存的应用程序密码。')
       .addComponent((element) => new SecretComponent(this.app, element)
         .setValue(this.plugin.settings.secretRef)
         .onChange((value) => { void this.plugin.updateSetting('secretRef', value || ''); }));
+    const passwordHelp = containerEl.createEl('details', { cls: 'native-wordpress-password-help' });
+    passwordHelp.createEl('summary', { text: '如何获取、保存和撤销？' });
+    passwordHelp.createEl('p', { text: '在 WordPress 后台 → 用户 → 个人资料 → 应用程序密码，为 Obsidian 新建一条。生成的密码只显示一次，请直接保存到 Obsidian 安全存储，不要发到聊天或写进笔记。' });
+    passwordHelp.createEl('p', { text: '在上方秘密选择器中添加并保存这份密码，再选中它。名称只是本地标签，可以自定；不是 WordPress 用户名，也不会在 WordPress 创建新密码。插件设置只保存引用。' });
+    passwordHelp.createEl('p', { text: '不再使用时，可在同一 WordPress 后台页面单独撤销这条应用程序密码，无需更改网站登录密码。找不到入口时，请检查 WordPress 版本、HTTPS 和站点是否允许应用程序密码。' });
     new Setting(containerEl)
       .setName('本地预览 CSS（可选）')
       .setDesc('填写 Vault 相对路径，例如 styles/blog.css；留空使用内置样式。仅用于预览，不上传。')
@@ -379,6 +381,10 @@ class NativeWordPressPlugin extends Plugin {
     if (this.unloaded || !['siteUrl', 'username', 'secretRef', 'previewCssPath'].includes(key)) return;
     this.settings = sanitizeSettings({ ...this.settings, [key]: value });
     this.controller.setSettings();
+    if (key !== 'previewCssPath') {
+      this.lastPreview = null;
+      this.currentView?.update(null);
+    }
     if (key === 'previewCssPath') this.refreshStyle();
     const snapshot = { ...this.settings };
     this._settingsSave = (this._settingsSave || Promise.resolve()).catch(() => {}).then(() => this.saveData(snapshot));
@@ -389,6 +395,12 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   async runAction(action) {
+    if (!this.lastPreview || (action === 'checkStatus'
+      ? this.lastPreview.needsCheck !== true || this.lastPreview.manualRequired === true
+      : !this.lastPreview.canPublish || this.lastPreview.needsCheck === true)) {
+      new Notice('请等待预览就绪，或先处理预览中的提示。', 5000);
+      return;
+    }
     let result;
     try { result = action === 'checkStatus' ? await this.controller.checkStatus() : await this.controller.publish(); }
     catch { result = { status: 'blocked', message: '操作未完成，请检查设置和文章。' }; }

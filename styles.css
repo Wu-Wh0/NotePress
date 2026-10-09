@@ -1,3 +1,82 @@
+/* Native preview chrome; article styling remains inside the sandbox. */
+.workspace-leaf-content[data-type="native-wordpress-preview"] > .view-content.native-wordpress-preview {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.native-wordpress-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.native-wordpress-info {
+  display: flex;
+  flex: 1 1 12rem;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--font-ui-small);
+}
+
+.native-wordpress-state {
+  color: var(--text-muted);
+}
+
+.native-wordpress-actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.native-wordpress-actions [hidden] {
+  display: none;
+}
+
+.native-wordpress-feedback {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.native-wordpress-feedback:empty {
+  display: none;
+}
+
+.native-wordpress-frame {
+  display: block;
+  flex: 1 1 0;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+}
+
+.native-wordpress-password-help {
+  margin: 0 0 16px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.native-wordpress-password-help summary {
+  cursor: pointer;
+  color: var(--text-accent);
+}
+
+.native-wordpress-password-help p {
+  line-height: 1.6;
+}
+
 /* Scoped styles for the local WordPress-like article preview. */
 .wordpress-preview {
   --wp-preview-text: var(--text-normal);

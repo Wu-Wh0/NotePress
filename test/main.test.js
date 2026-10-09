@@ -14,6 +14,8 @@ class FakeElement {
     this.listeners = {};
     this.disabled = false;
     this.srcdoc = '';
+    this.style = {};
+    this.className = options.cls || '';
   }
   empty() { this.children = []; this.textContent = ''; }
   createDiv(options = {}) { return this.createEl('div', options); }
@@ -25,6 +27,7 @@ class FakeElement {
   }
   setText(text) { this.textContent = String(text); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  addClass(value) { this.className = [this.className, value].filter(Boolean).join(' '); }
   addEventListener(name, callback) { this.listeners[name] = callback; }
   click() { if (!this.disabled) this.listeners.click?.({ target: this }); }
 }
@@ -188,6 +191,78 @@ test('CommonJS plugin entry registers native preview, command, settings, and a s
   assert.match(view.infoEl.children.map(child => child.textContent).join(''), /人工核对/);
 
   await view.onClose();
+  await plugin.onunload();
+});
+
+test('preview uses a panel-sized frame and one toolbar without a permanently disabled check action', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+  const view = plugin.viewFactory({});
+  await view.onOpen();
+  assert.equal(view.frame.style.height || '', '');
+  assert.equal(view.frame.style.minHeight || '', '');
+  assert.match(view.contentEl.className, /native-wordpress-preview/);
+  const toolbar = view.contentEl.children.find(child => child.className === 'native-wordpress-toolbar');
+  assert.ok(toolbar.children.includes(view.infoEl));
+  view.update({ html: '<p>ready</p>', canPublish: true, siteUrl: 'https://blog.example' });
+  assert.equal(view.checkButton.hidden, true);
+  view.update({ html: '<p>pending</p>', canPublish: false, needsCheck: true, siteUrl: 'https://blog.example' });
+  assert.equal(view.checkButton.hidden, false);
+  assert.equal(view.checkButton.disabled, false);
+  view.update({ html: '<p>manual</p>', needsCheck: true, manualRequired: true, siteUrl: 'https://blog.example' });
+  assert.equal(view.checkButton.hidden, true);
+  assert.equal(view.publishButton.disabled, true);
+  await view.onClose();
+  await plugin.onunload();
+});
+
+test('connection settings immediately invalidate displayed publication while save is pending', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+  const view = plugin.viewFactory({});
+  await view.onOpen();
+  await plugin.controller.refresh();
+  assert.equal(view.publishButton.disabled, false);
+  let release;
+  plugin.saveData = () => new Promise(resolve => { release = resolve; });
+  let calls = 0;
+  plugin.controller.publish = async () => { calls++; return { status: 'published' }; };
+  const change = plugin.updateSetting('siteUrl', 'https://new.example');
+  await Promise.resolve();
+  assert.equal(view.publishButton.disabled, true);
+  assert.equal(plugin.lastPreview, null);
+  await plugin.runAction('publish');
+  assert.equal(calls, 0);
+  release();
+  await change;
+  await plugin.controller.refresh();
+  assert.equal(view.publishButton.disabled, false);
+  assert.equal(plugin.lastPreview.siteUrl, 'https://new.example');
+  await view.onClose();
+  await plugin.onunload();
+});
+
+test('application password settings explain purpose, WordPress source, local labels, and revocation without a wizard', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+  plugin.settingsTab.display();
+  const setting = settingComponents.filter(item => item.name === '应用程序密码').at(-1);
+  assert.match(setting.desc, /发布文章/);
+  assert.match(setting.desc, /不是.*登录密码/);
+  const help = plugin.settingsTab.containerEl.children.find(child => child.tagName === 'details');
+  assert.ok(help);
+  assert.equal(help.children[0].tagName, 'summary');
+  const text = help.children.map(child => child.textContent).join(' ');
+  assert.match(text, /WordPress 后台.*个人资料.*应用程序密码/);
+  assert.match(text, /名称只是.*标签/);
+  assert.match(text, /撤销/);
+  assert.equal(setting.customComponent.value, 'saved-ref');
   await plugin.onunload();
 });
 
