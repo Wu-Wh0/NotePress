@@ -6,6 +6,7 @@ const { createHostController, sanitizeSettings } = require('./host-controller');
 const { extractImageReferences, renderArticle } = require('./article');
 const { createWordPressClient } = require('./wordpress-client');
 const { createPublisher } = require('./publisher');
+const { readPreviewCss, safeCustomCss } = require('./preview-css');
 
 const { Plugin, ItemView, PluginSettingTab, Setting, SecretComponent, MarkdownView, TFile, FileSystemAdapter, Notice } = obsidian;
 const VIEW_TYPE = 'native-wordpress-preview';
@@ -76,8 +77,8 @@ function articleWithoutLinks(html) {
     .replace(/<\/a\s*>/gi, '</span>');
 }
 
-function buildFrameDocument(html, katexCss = '', localImages = new Map()) {
-  const styles = `${BASE_CSS}\n${offlineCss(katexCss)}`;
+function buildFrameDocument(html, katexCss = '', localImages = new Map(), customCss = '') {
+  const styles = `${BASE_CSS}\n${offlineCss(katexCss)}\n${safeCustomCss(customCss) || ''}`;
   // Renderer output contains quoted raster-image src attributes. Blob URLs
   // belong to the parent origin and cannot load in an opaque sandbox frame.
   // Only substitute data backed by the controller's already bounded reads.
@@ -158,11 +159,11 @@ class BlogPreviewView extends ItemView {
     this.infoEl.createSpan({ text: ` · ${stateText}` });
 
     const issueText = Array.isArray(preview?.issues) ? preview.issues.map((item) => item.message).filter(Boolean).join(' ') : '';
-    this.feedbackEl.setText(issueText);
+    this.feedbackEl.setText([issueText, this.plugin.styleMessage].filter(Boolean).join(' '));
     this.publishButton.setText(preview?.publishedLink ? '更新文章' : '发布文章');
     this.publishButton.disabled = this.busy || !preview?.canPublish || preview?.needsCheck === true;
     this.checkButton.disabled = this.busy || preview?.needsCheck !== true || preview?.manualRequired === true;
-    if (this.frame && preview) this.frame.srcdoc = buildFrameDocument(preview.html, localKatexCss(), this.plugin.previewImages);
+    if (this.frame && preview) this.frame.srcdoc = buildFrameDocument(preview.html, localKatexCss(), this.plugin.previewImages, this.plugin.customCss);
   }
 
   setBusy(value) {
@@ -202,6 +203,11 @@ class BlogSettingsTab extends PluginSettingTab {
         .setValue(this.plugin.settings.secretRef)
         .onChange((value) => { void this.plugin.updateSetting('secretRef', value || ''); }));
     new Setting(containerEl)
+      .setName('本地预览 CSS（可选）')
+      .setDesc('填写 Vault 相对路径，例如 styles/blog.css；留空使用内置样式。仅用于预览，不上传。')
+      .addText(text => text.setPlaceholder('styles/blog.css').setValue(this.plugin.settings.previewCssPath || '')
+        .onChange(value => { void this.plugin.updateSetting('previewCssPath', value); }));
+    new Setting(containerEl)
       .setName('连接测试')
       .setDesc('仅探测 WordPress REST 路由和当前作者权限，不创建文章或上传文件。')
       .addButton((button) => button.setButtonText('测试连接').onClick(async () => {
@@ -216,7 +222,7 @@ class NativeWordPressPlugin extends Plugin {
     const stored = await this.loadData();
     this.settings = sanitizeSettings(stored);
     const hasUnknownSettings = stored && typeof stored === 'object' && !Array.isArray(stored)
-      && Object.keys(stored).some((key) => !['siteUrl', 'username', 'secretRef'].includes(key));
+      && Object.keys(stored).some((key) => !['siteUrl', 'username', 'secretRef', 'previewCssPath'].includes(key));
     if (hasUnknownSettings) {
       try { await this.saveData({ ...this.settings }); } catch {
         this.settings.secretRef = '';
@@ -228,6 +234,10 @@ class NativeWordPressPlugin extends Plugin {
     this.refreshTimer = null;
     this.journalStores = new Map();
     this.previewImages = new Map();
+    this.styleGeneration = 0;
+    this.unloaded = false;
+    this.customCss = '';
+    this.styleMessage = '';
     this.selectedFile = this.app.workspace.getActiveFile();
     this.controller = createHostController({
       getSettings: () => this.settings,
@@ -288,12 +298,15 @@ class NativeWordPressPlugin extends Plugin {
       this.controller.invalidate('editor-change');
       this.scheduleRefresh();
     }));
+    this.registerEvent(this.app.vault.on('create', (file) => this.handleVaultChange(file?.path)));
     this.registerEvent(this.app.vault.on('modify', (file) => this.handleVaultChange(file?.path)));
     this.registerEvent(this.app.vault.on('delete', (file) => this.handleVaultChange(file?.path)));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+      if ([oldPath, file?.path].includes(this.settings.previewCssPath)) this.refreshStyle();
       const changed = this.controller.invalidate('vault-rename', oldPath) || this.controller.invalidate('vault-rename', file?.path);
       if (changed) this.scheduleRefresh();
     }));
+    this.refreshStyle();
   }
 
   getJournalStore(settings) {
@@ -332,10 +345,29 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   handleVaultChange(filePath) {
+    if (filePath && filePath === this.settings.previewCssPath) this.refreshStyle();
     if (this.controller.invalidate('vault-change', filePath)) this.scheduleRefresh();
   }
 
+  refreshStyle() {
+    if (this.unloaded) return;
+    const generation = ++this.styleGeneration;
+    const filePath = this.settings.previewCssPath || '';
+    this.controller.invalidate('preview-style-change');
+    this.customCss = '';
+    this.styleMessage = '';
+    this.currentView?.update(this.lastPreview);
+    this.styleRefresh = readPreviewCss(this.app.vault.adapter, filePath).then(result => {
+      if (this.unloaded || generation !== this.styleGeneration || filePath !== (this.settings.previewCssPath || '')) return;
+      this.customCss = result.css;
+      this.styleMessage = result.message;
+      this.currentView?.update(this.lastPreview);
+      this.scheduleRefresh();
+    });
+  }
+
   scheduleRefresh() {
+    if (this.unloaded) return;
     clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
@@ -344,9 +376,10 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   async updateSetting(key, value) {
-    if (!['siteUrl', 'username', 'secretRef'].includes(key)) return;
+    if (this.unloaded || !['siteUrl', 'username', 'secretRef', 'previewCssPath'].includes(key)) return;
     this.settings = sanitizeSettings({ ...this.settings, [key]: value });
     this.controller.setSettings();
+    if (key === 'previewCssPath') this.refreshStyle();
     const snapshot = { ...this.settings };
     this._settingsSave = (this._settingsSave || Promise.resolve()).catch(() => {}).then(() => this.saveData(snapshot));
     try { await this._settingsSave; } catch {
@@ -366,6 +399,11 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   async onunload() {
+    this.unloaded = true;
+    this.styleGeneration += 1;
+    this.customCss = '';
+    this.styleMessage = '';
+    if (this.currentView?.frame) this.currentView.frame.srcdoc = '';
     clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     this.controller?.dispose();

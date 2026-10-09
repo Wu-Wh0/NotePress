@@ -12,7 +12,7 @@ const IMAGE_TYPES = new Map([
   ['png', 'image/png'], ['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg'], ['gif', 'image/gif'],
   ['webp', 'image/webp'], ['avif', 'image/avif'], ['bmp', 'image/bmp'],
 ]);
-const SAFE_SETTING_KEYS = ['siteUrl', 'username', 'secretRef'];
+const SAFE_SETTING_KEYS = ['siteUrl', 'username', 'secretRef', 'previewCssPath'];
 
 function safeString(value, limit) {
   return typeof value === 'string' && value.length <= limit && !/[\u0000-\u001f\u007f]/u.test(value)
@@ -26,6 +26,8 @@ function sanitizeSettings(value) {
     siteUrl: safeString(input.siteUrl, 2048),
     username: safeString(input.username, 120),
     secretRef: /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(secret) ? secret : '',
+    ...(typeof input.previewCssPath === 'string' && input.previewCssPath !== ''
+      ? { previewCssPath: input.previewCssPath.slice(0, 2049) } : {}),
   };
 }
 

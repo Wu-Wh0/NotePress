@@ -227,3 +227,104 @@ test('font-inlined CSS larger than the old limit remains in the sandbox document
   const css = '@font-face{font-family:KaTeX_Main;src:url("data:font/woff2;base64,' + 'A'.repeat(300000) + '")}';
   assert.match(main.buildFrameDocument('<p>math</p>', css), /font-family:KaTeX_Main/);
 });
+
+test('custom CSS overrides built-in styling without changing sandbox or offline fonts', () => {
+  const main = loadMainWithSyntheticModules();
+  const css = 'article{color:tomato}';
+  const frame = main.buildFrameDocument('<p>body</p>', '@font-face{src:url(data:font/woff2;base64,AAAA)}', new Map(), css);
+  assert.ok(frame.indexOf(css) > frame.indexOf('@font-face'));
+  assert.match(frame, /connect-src 'none'/);
+  for (const unsafe of ['</style><script>alert(1)</script>', '@import "https://evil.test/x";', 'a{background:url(https://evil.test/x)}', 'a{background:u\\72l(https://evil.test/x)}', 'a{background:image-set("https://evil.test/x" 1x)}']) {
+    assert.ok(!main.buildFrameDocument('', '', new Map(), unsafe).includes(unsafe));
+  }
+});
+
+test('local stylesheet persists, refreshes on modify/delete/rename and clears without network writes', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app, listeners } = makeApp();
+  let css = 'article{color:tomato}';
+  let exists = true;
+  const reads = [];
+  // Pure Vault adapter stub; real filesystem confinement is tested separately.
+  app.vault.adapter.getBasePath = undefined;
+  app.vault.adapter.stat = async p => p === 'styles/blog.css' && exists ? { type: 'file', size: Buffer.byteLength(css) } : null;
+  app.vault.adapter.read = async p => { reads.push(p); return css; };
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+  const view = plugin.viewFactory({});
+  await view.onOpen();
+  await plugin.controller.refresh();
+  await plugin.updateSetting('previewCssPath', 'styles/blog.css');
+  await plugin.styleRefresh;
+  assert.equal(plugin.savedData.previewCssPath, 'styles/blog.css');
+  const reloadApp = makeApp().app;
+  reloadApp.vault.adapter = app.vault.adapter;
+  const restored = new main(reloadApp, { id: 'synthetic-wordpress' });
+  restored.loadData = async () => ({ ...plugin.savedData, password: 'DO_NOT_KEEP' });
+  await restored.onload();
+  await restored.styleRefresh;
+  assert.equal(restored.customCss, css);
+  assert.equal(restored.savedData.password, undefined);
+  await restored.onunload();
+  assert.match(view.frame.srcdoc, /article\{color:tomato\}/);
+  assert.equal(view.frame.attributes.sandbox, '');
+  css = 'article{color:blue}';
+  listeners.vault.modify({ path: 'styles/blog.css' });
+  await plugin.styleRefresh;
+  assert.match(view.frame.srcdoc, /article\{color:blue\}/);
+  exists = false;
+  listeners.vault.rename({ path: 'styles/moved.css' }, 'styles/blog.css');
+  await plugin.styleRefresh;
+  assert.doesNotMatch(view.frame.srcdoc, /article\{color:blue\}/);
+  assert.match(view.feedbackEl.textContent, /CSS/);
+  const noticeCount = notices.length;
+  await plugin.controller.refresh();
+  await plugin.controller.refresh();
+  assert.equal(notices.length, noticeCount);
+  exists = true;
+  assert.equal(typeof listeners.vault.create, 'function');
+  listeners.vault.create({ path: 'styles/blog.css' });
+  await plugin.styleRefresh;
+  assert.match(view.frame.srcdoc, /article\{color:blue\}/);
+  exists = false;
+  listeners.vault.delete({ path: 'styles/blog.css' });
+  await plugin.styleRefresh;
+  assert.doesNotMatch(view.frame.srcdoc, /article\{color:blue\}/);
+  await plugin.updateSetting('previewCssPath', '');
+  assert.equal(plugin.customCss, '');
+  assert.equal(plugin.styleMessage, '');
+  assert.ok(reads.every(p => p === 'styles/blog.css'));
+  await plugin.onunload();
+});
+
+test('late stylesheet reads cannot restore cleared, replaced or unloaded CSS', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp();
+  const pending = [];
+  app.vault.adapter.getBasePath = undefined;
+  app.vault.adapter.stat = async () => ({ type: 'file', size: 20 });
+  app.vault.adapter.read = () => new Promise(resolve => pending.push(resolve));
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+  await plugin.updateSetting('previewCssPath', 'old.css');
+  const old = plugin.styleRefresh;
+  await plugin.updateSetting('previewCssPath', 'new.css');
+  pending[1]('article{color:blue}');
+  await plugin.styleRefresh;
+  pending[0]('article{color:red}');
+  await old;
+  assert.equal(plugin.customCss, 'article{color:blue}');
+  await plugin.updateSetting('previewCssPath', 'clear.css');
+  const clearing = plugin.styleRefresh;
+  await plugin.updateSetting('previewCssPath', '');
+  pending[2]('article{color:red}');
+  await clearing;
+  assert.equal(plugin.customCss, '');
+  await plugin.updateSetting('previewCssPath', 'unload.css');
+  const unloading = plugin.styleRefresh;
+  await plugin.onunload();
+  pending[3]('article{color:red}');
+  await unloading;
+  assert.equal(plugin.customCss, '');
+  assert.equal(plugin.refreshTimer, null);
+});

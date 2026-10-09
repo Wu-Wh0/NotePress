@@ -13,6 +13,8 @@ This is a **buildable first-version candidate**, not a production release. Nativ
 
 Do not use a primary vault or production site for candidate acceptance.
 
+Optional **本地预览 CSS** accepts one explicit Vault-relative `.css` path (for example `styles/blog.css`); blank keeps the built-in theme. Files are limited to 128 KiB before and after reading. Custom rules follow built-in preview styles and are never added to publication HTML, uploads or receipts. Creation, changes, deletion, rename and clearing the setting refresh or fall back to built-in styling. Invalid files show a message in the preview. Resource references (`@import`, `url()`, `image-set()`), CSS escapes and `<` are deliberately unsupported; bundled offline KaTeX fonts remain available. Hidden files/folders (including `.obsidian`) are unsupported because normal Vault change events do not cover them. Linked descendants are rejected by real-path checks before the desktop adapter reads CSS; no folders are scanned.
+
 ## Supported boundary
 
 - Markdown paragraphs, headings, lists, tables, code and bounded KaTeX expressions; Obsidian image embeds and Markdown images. Note properties are excluded from publication. Preview title/wrapper and publication body are separate.

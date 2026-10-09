@@ -153,6 +153,8 @@ test('source, image, selection and settings changes invalidate the frozen public
     (f) => { const image = f.fileMap.get('notes/assets/pic.png'); image.bytes = Buffer.from('changed'); image.stat = { size: image.bytes.length, mtime: 2 }; },
     (f) => { f.state.selected = new FakeTFile('notes/other.md'); f.controller.invalidate('active-leaf-change'); f.state.selected = f.note; f.controller.invalidate('active-leaf-change'); },
     (f) => { f.state.settings = { ...f.state.settings, siteUrl: 'https://other.example' }; f.controller.setSettings(); },
+    (f) => { f.state.settings = { ...f.state.settings, previewCssPath: 'styles/new.css' }; },
+    (f) => { f.controller.invalidate('preview-style-change'); },
   ]) {
     let plan;
     const f = fixture({
