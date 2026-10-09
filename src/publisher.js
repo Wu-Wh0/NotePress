@@ -476,18 +476,21 @@ function createPublisher({ client, store, siteUrl } = {}) {
         return result('draft', { postID: record.postID, canResume: true });
       }
       const bodyHtml = render(ready.prepared, record);
-      if (bodyHtml === null || record.expectedBodyHash !== sha256(Buffer.from(bodyHtml, 'utf8'))) {
+      if (bodyHtml === null || (record.stage !== 'completed'
+          && record.expectedBodyHash !== sha256(Buffer.from(bodyHtml, 'utf8')))) {
         return result('needs-check', { postID: record.postID, reason: 'expected-content-unavailable' });
       }
       const status = record.stage === 'updating-draft' ? 'draft' : 'publish';
       let post;
       try { post = await client.getPost(record.postID); } catch { return result('needs-check', { postID: record.postID, reason: 'readback-unavailable' }); }
       const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID);
-      if (!snapshot || snapshot.title !== ready.prepared.title || snapshot.content !== bodyHtml) {
+      if (!snapshot || snapshot.title !== ready.prepared.title || snapshot.content !== bodyHtml
+          || (record.stage === 'completed' && snapshot.hash !== record.remoteHash)) {
         return result('needs-check', { postID: record.postID, reason: 'readback-mismatch' });
       }
       if (snapshot.status !== status) return result(snapshot.status === 'draft' ? 'draft' : 'needs-check', { postID: record.postID, link: snapshot.link });
       if (status !== 'publish') return result('draft', { postID: record.postID });
+      if (record.stage === 'completed') return result('published', { postID: record.postID, link: snapshot.link });
       record.stage = 'completed';
       record.link = snapshot.link;
       record.remoteHash = snapshot.hash;

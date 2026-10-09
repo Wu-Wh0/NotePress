@@ -254,6 +254,40 @@ test('native plain permalink URLs are accepted for draft and published readback'
   assert.equal(published.link, 'https://blog.example/?p=1');
 });
 
+test('completed receipt checking confirms the exact remote baseline without writes or journal changes', async () => {
+  for (const edited of [false, true]) {
+    const f = fixture();
+    const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+    let currentPlan = plan();
+    const first = await publisher.publish(currentPlan);
+    if (edited) {
+      currentPlan = plan({ source: 'Edited body' });
+      assert.equal((await publisher.publish(currentPlan)).postID, first.postID);
+    }
+    const baseline = structuredClone(f.records.get('note-17'));
+    const post = structuredClone(f.state.posts.get(first.postID));
+    const saves = f.state.saveCount;
+    const writes = f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length;
+    assert.equal(baseline.expectedBodyHash, undefined);
+    assert.equal((await publisher.checkStatus('note-17', currentPlan)).status, 'published');
+    for (const patch of [
+      { id: post.id + 1 }, { author: 99 }, { status: 'draft' },
+      { title: { raw: 'Remote title' } }, { content: { raw: 'Remote body' } },
+      { link: 'https://blog.example/changed-link' },
+    ]) {
+      f.state.posts.set(first.postID, { ...post, ...patch });
+      assert.equal((await publisher.checkStatus('note-17', currentPlan)).status, 'needs-check');
+      assert.deepEqual(f.records.get('note-17'), baseline);
+    }
+    f.state.posts.set(first.postID, post);
+    assert.equal((await publisher.checkStatus('note-17', plan({ source: 'Unsaved drift' }))).status, 'needs-check');
+    assert.equal((await publisher.checkStatus('note-17', currentPlan)).status, 'published');
+    assert.deepEqual(f.records.get('note-17'), baseline);
+    assert.equal(f.state.saveCount, saves);
+    assert.equal(f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length, writes);
+  }
+});
+
 test('created draft is read and bound to its exact ID before uploading article images', async () => {
   const f = fixture();
   const get = f.client.getPost;
