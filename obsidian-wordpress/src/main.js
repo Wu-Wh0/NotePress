@@ -76,9 +76,16 @@ function articleWithoutLinks(html) {
     .replace(/<\/a\s*>/gi, '</span>');
 }
 
-function buildFrameDocument(html, katexCss = '') {
+function buildFrameDocument(html, katexCss = '', localImages = new Map()) {
   const styles = `${BASE_CSS}\n${offlineCss(katexCss)}`;
-  const body = articleWithoutLinks(html);
+  // Renderer output contains quoted raster-image src attributes. Blob URLs
+  // belong to the parent origin and cannot load in an opaque sandbox frame.
+  // Only substitute data backed by the controller's already bounded reads.
+  const body = articleWithoutLinks(html).replace(/\bsrc="(blob:[^"]*)"/g, (_attribute, url) => {
+    const data = localImages.get(url);
+    return typeof data === 'string' && /^data:image\/(?:png|jpeg|gif|webp|avif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/.test(data)
+      ? `src="${data}"` : '';
+  });
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${CONTENT_SECURITY_POLICY}"><meta name="referrer" content="no-referrer"><style>${styles}</style></head><body>${body}</body></html>`;
 }
 
@@ -155,7 +162,7 @@ class BlogPreviewView extends ItemView {
     this.publishButton.setText(preview?.publishedLink ? '更新文章' : '发布文章');
     this.publishButton.disabled = this.busy || !preview?.canPublish || preview?.needsCheck === true;
     this.checkButton.disabled = this.busy || preview?.needsCheck !== true || preview?.manualRequired === true;
-    if (this.frame && preview) this.frame.srcdoc = buildFrameDocument(preview.html, localKatexCss());
+    if (this.frame && preview) this.frame.srcdoc = buildFrameDocument(preview.html, localKatexCss(), this.plugin.previewImages);
   }
 
   setBusy(value) {
@@ -220,6 +227,7 @@ class NativeWordPressPlugin extends Plugin {
     this.lastPreview = null;
     this.refreshTimer = null;
     this.journalStores = new Map();
+    this.previewImages = new Map();
     this.selectedFile = this.app.workspace.getActiveFile();
     this.controller = createHostController({
       getSettings: () => this.settings,
@@ -243,8 +251,12 @@ class NativeWordPressPlugin extends Plugin {
       getSecret: (reference) => this.app.secretStorage?.getSecret(reference) ?? null,
       extractImageReferences,
       renderArticle,
-      createObjectURL: (bytes, mime) => URL.createObjectURL(new Blob([bytes], { type: mime })),
-      revokeObjectURL: (url) => URL.revokeObjectURL(url),
+      createObjectURL: (bytes, mime) => {
+        const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+        this.previewImages.set(url, `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`);
+        return url;
+      },
+      revokeObjectURL: (url) => { this.previewImages.delete(url); URL.revokeObjectURL(url); },
       createClient: (options) => createWordPressClient(options),
       createPublisher: (options) => createPublisher(options),
       getStore: (settings) => this.getJournalStore(settings),

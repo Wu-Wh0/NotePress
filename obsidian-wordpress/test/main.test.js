@@ -202,6 +202,15 @@ test('frame builder rejects remote CSS imports, removes article links, and prese
   assert.equal(main.safePostUrl('https://attacker.example/post', 'https://blog.example'), '');
 });
 
+test('opaque sandbox image document uses only byte-backed local raster data URLs', () => {
+  const main = loadMainWithSyntheticModules();
+  const assets = new Map([['blob:synthetic/local', 'data:image/png;base64,aW1hZ2U='], ['blob:synthetic/unsafe', 'https://outside.example/image']]);
+  const frame = main.buildFrameDocument('<article><img src="blob:synthetic/local"><img src="blob:synthetic/missing"><img src="blob:synthetic/unsafe"></article>', '', assets);
+  assert.match(frame, /src="data:image\/png;base64,aW1hZ2U="/);
+  assert.doesNotMatch(frame, /src="blob:|src="https:/);
+  assert.match(frame, /script-src 'none'/);
+});
+
 test('preview-focused publication reads unsaved source and rejects conflicting source buffers', async () => {
   const main = loadMainWithSyntheticModules();
   const { app, note } = makeApp();
