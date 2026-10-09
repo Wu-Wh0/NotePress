@@ -40,7 +40,7 @@ function setup(directory, attachmentFolder = null) {
       onPreview: value => state.previews.push(value),
     });
   }
-  return { state, image, controller };
+  return { state, image, controller, client };
 }
 
 async function temporary(t) {
@@ -96,4 +96,45 @@ test('basename image resolves exactly to the configured current-note attachment 
   assert.equal((await c.refresh()).canPublish, true);
   assert.equal((await c.publish()).status, 'published');
   c.dispose();
+});
+
+test('known draft recovery is read-only and cold continuation requires a separate publish without duplicate resources', async t => {
+  for (const phase of ['draft-created', 'updating-draft']) {
+    const f = setup(await temporary(t));
+    const get = f.client.getPost;
+    const update = f.client.updatePost;
+    let armed = true;
+    f.client.getPost = async id => {
+      if (armed && phase === 'draft-created') { armed = false; throw new Error('SIMULATED-read-failure'); }
+      return get(id);
+    };
+    f.client.updatePost = async (id, fields) => {
+      const response = await update(id, fields);
+      if (armed && phase === 'updating-draft' && fields.status === 'draft') {
+        armed = false;
+        throw new Error('SIMULATED-lost-ack');
+      }
+      return response;
+    };
+    const first = f.controller();
+    assert.equal((await first.publish()).status, 'needs-check');
+    first.dispose();
+    const cold = f.controller();
+    const before = [...f.state.writes];
+    assert.equal((await cold.refresh()).canPublish, false);
+    const checked = await cold.checkStatus();
+    assert.equal(checked.status, 'draft');
+    assert.equal(checked.canResume, true);
+    assert.match(checked.message, /已核对.*再次点击发布/);
+    assert.deepEqual(f.state.writes, before);
+    assert.equal(f.state.post.status, 'draft');
+    cold.dispose();
+    const resumed = f.controller();
+    assert.equal((await resumed.refresh()).canPublish, true);
+    assert.equal((await resumed.publish()).status, 'published');
+    assert.equal(f.state.post.id, 41);
+    assert.equal(f.state.writes.filter(x => x === 'create').length, 1);
+    assert.equal(f.state.writes.filter(x => x === 'media').length, 1);
+    resumed.dispose();
+  }
 });

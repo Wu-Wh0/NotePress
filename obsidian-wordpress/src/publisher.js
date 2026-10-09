@@ -299,20 +299,26 @@ function createPublisher({ client, store, siteUrl } = {}) {
 
   async function publishNew(prepared, record) {
     if (!await current(prepared)) return result('blocked', { reason: 'input-changed' });
-    let created;
-    try { created = await client.createPost({ title: prepared.title, content: '', status: 'draft' }); }
-    catch { return pending(record, 'create-write-uncertain'); }
-    if (!Number.isSafeInteger(created?.id) || created.id < 1) return pending(record, 'create-acknowledgement-invalid');
-    record.postID = created.id;
-    record.stage = 'draft-created';
-    if (!await saveJournal(record)) return pending(record, 'journal-unavailable');
+    const resuming = typeof record.draftRemoteHash === 'string';
+    if (!resuming) {
+      let created;
+      try { created = await client.createPost({ title: prepared.title, content: '', status: 'draft' }); }
+      catch { return pending(record, 'create-write-uncertain'); }
+      if (!Number.isSafeInteger(created?.id) || created.id < 1) return pending(record, 'create-acknowledgement-invalid');
+      record.postID = created.id;
+      record.stage = 'draft-created';
+      if (!await saveJournal(record)) return pending(record, 'journal-unavailable');
+    }
 
     let initial;
     try { initial = await client.getPost(record.postID); }
     catch { return pending(record, 'created-draft-readback-unavailable'); }
     const initialSnapshot = remoteSnapshot(initial, record.ownerID, site.origin, record.postID);
+    const initialBody = resuming && record.stage === 'updating-draft' ? render(prepared, record) : '';
     if (!initialSnapshot || initialSnapshot.status !== 'draft' || initialSnapshot.title !== prepared.title
-        || initialSnapshot.content !== '') return pending(record, 'created-draft-readback-mismatch');
+        || initialSnapshot.content !== initialBody
+        || (resuming && initialSnapshot.hash !== record.draftRemoteHash)) return pending(record, 'created-draft-readback-mismatch');
+    delete record.draftRemoteHash;
 
     const uploaded = await ensureMedia(prepared, record);
     if (uploaded.status !== 'ready') return { ...uploaded, postID: record.postID };
@@ -426,6 +432,10 @@ function createPublisher({ client, store, siteUrl } = {}) {
         if (!validJournal(existing, prepared.noteID, site.value) || existing.ownerID !== prepared.ownerID) {
           return result('blocked', { reason: 'journal-binding-mismatch' });
         }
+        if (['draft-created', 'updating-draft'].includes(existing.stage) && /^[a-f0-9]{64}$/u.test(existing.draftRemoteHash || '')) {
+          if (existing.planHash !== prepared.planHash) return pending(existing, 'plan-binding-mismatch');
+          return publishNew(prepared, clone(existing));
+        }
         if (existing.stage !== 'completed') return pending(existing, 'pending-operation');
         return publishUpdate(prepared, clone(existing));
       }
@@ -450,6 +460,20 @@ function createPublisher({ client, store, siteUrl } = {}) {
       const ready = await prepareFor(plan);
       if (ready.error || ready.prepared.planHash !== record.planHash || ready.prepared.ownerID !== record.ownerID) {
         return result('needs-check', { postID: record.postID, reason: 'plan-binding-mismatch' });
+      }
+      if (['draft-created', 'updating-draft'].includes(record.stage)) {
+        const bodyHtml = record.stage === 'draft-created' ? '' : render(ready.prepared, record);
+        if (bodyHtml === null || (record.stage === 'updating-draft'
+            && record.expectedBodyHash !== sha256(Buffer.from(bodyHtml, 'utf8')))) return pending(record, 'expected-content-unavailable');
+        let post;
+        try { post = await client.getPost(record.postID); } catch { return pending(record, 'readback-unavailable'); }
+        const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID);
+        if (!snapshot || snapshot.status !== 'draft' || snapshot.title !== ready.prepared.title
+            || snapshot.content !== bodyHtml) return pending(record, 'readback-mismatch');
+        if (!await current(ready.prepared)) return pending(record, 'input-changed');
+        record.draftRemoteHash = snapshot.hash;
+        if (!await saveJournal(record)) return pending(record, 'journal-unavailable');
+        return result('draft', { postID: record.postID, canResume: true });
       }
       const bodyHtml = render(ready.prepared, record);
       if (bodyHtml === null || record.expectedBodyHash !== sha256(Buffer.from(bodyHtml, 'utf8'))) {

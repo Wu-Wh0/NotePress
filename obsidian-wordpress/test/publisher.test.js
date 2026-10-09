@@ -377,3 +377,45 @@ test('indeterminate post update retains its previous receipt but is never restor
   assert.equal(checked.postID, first.postID);
   assert.equal(f.records.get('note-17').previousReceipt, undefined);
 });
+
+test('draft recovery rejects mismatched readback, plan drift and failed persistence without authorizing writes', async () => {
+  for (const mutation of [post => { post.id += 1; }, post => { post.author += 1; },
+    post => { post.status = 'publish'; }, post => { post.title.raw += 'remote'; },
+    post => { post.content.raw = 'remote'; }, post => { post.link = 'https://other.example/post/1'; }]) {
+    const f = fixture();
+    const get = f.client.getPost;
+    f.client.getPost = async () => { throw new Error('SIMULATED-read-failure'); };
+    const p = createPublisher({ client: f.client, store: f.store, siteUrl });
+    await p.publish(plan());
+    const prior = structuredClone(f.records.get('note-17'));
+    f.client.getPost = async id => { const post = await get(id); mutation(post); return post; };
+    const before = f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length;
+    assert.equal((await p.checkStatus('note-17', plan())).status, 'needs-check');
+    assert.deepEqual(f.records.get('note-17'), prior);
+    assert.equal((await p.publish(plan())).status, 'needs-check');
+    assert.equal(f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length, before);
+  }
+  const f = fixture();
+  const get = f.client.getPost;
+  f.client.getPost = async () => { throw new Error('SIMULATED-read-failure'); };
+  const p = createPublisher({ client: f.client, store: f.store, siteUrl });
+  await p.publish(plan());
+  f.client.getPost = get;
+  const prior = structuredClone(f.records.get('note-17'));
+  const save = f.store.save;
+  f.store.save = async () => { throw new Error('SIMULATED-disk-failure'); };
+  assert.equal((await p.checkStatus('note-17', plan())).reason, 'journal-unavailable');
+  assert.deepEqual(f.records.get('note-17'), prior);
+  f.store.save = save;
+  assert.equal((await p.checkStatus('note-17', plan({ source: 'changed' }))).reason, 'plan-binding-mismatch');
+  assert.equal((await p.checkStatus('note-17', plan({ isCurrent: () => false }))).reason, 'input-changed');
+  assert.deepEqual(f.records.get('note-17'), prior);
+  assert.equal((await p.checkStatus('note-17', plan())).canResume, true);
+  const ready = structuredClone(f.records.get('note-17'));
+  assert.equal((await p.publish(plan({ source: 'changed' }))).reason, 'plan-binding-mismatch');
+  f.state.posts.get(1).content.raw = 'remote edit after checking';
+  assert.equal((await p.publish(plan())).reason, 'created-draft-readback-mismatch');
+  assert.deepEqual(f.records.get('note-17'), ready);
+  assert.equal(f.state.calls.filter(([name]) => name === 'createPost').length, 1);
+  assert.equal(f.state.calls.some(([name]) => ['uploadMedia', 'updatePost'].includes(name)), false);
+});

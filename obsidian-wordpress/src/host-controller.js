@@ -280,7 +280,8 @@ function createHostController(deps = {}) {
         || record.titleHash !== sha256(Buffer.from(snapshot.title, 'utf8')) || !assetsMatch);
       return {
         receipt: completed ? { link, dirty, needsCheck: false } : {
-          link: null, dirty: false, needsCheck: record.stage !== 'completed',
+          link: null, dirty: false, needsCheck: record.stage !== 'completed'
+            && !(['draft-created', 'updating-draft'].includes(record.stage) && /^[a-f0-9]{64}$/u.test(record.draftRemoteHash || '')),
           manualRequired: ['creating', 'uploading-media'].includes(record.stage),
         },
         store,
@@ -516,7 +517,8 @@ function createHostController(deps = {}) {
       catch { response = { status: 'needs-check', reason: 'check_failed' }; }
       if (!await verifySnapshot(snapshot)) return { status: 'needs-check', reason: 'input_changed', message: issueMessage('needs_check') };
       onAction({ busy: true, result: response, siteUrl: strictSiteLink(settings.siteUrl)?.value || '' });
-      return { ...response, message: issueMessage(response?.manualRequired ? 'manual_check' : response?.status === 'published' ? 'published' : response?.status === 'conflict' ? 'conflict' : 'needs_check') };
+      return { ...response, message: response?.canResume === true ? '草稿已核对，请再次点击发布。'
+        : issueMessage(response?.manualRequired ? 'manual_check' : response?.status === 'published' ? 'published' : response?.status === 'conflict' ? 'conflict' : 'needs_check') };
     });
   }
 

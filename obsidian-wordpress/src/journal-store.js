@@ -19,7 +19,7 @@ const BASE_FIELDS = [
 ];
 const OPTIONAL_FIELDS = [
   'postID', 'link', 'remoteHash', 'expectedBodyHash',
-  'inFlightAssetHash', 'previousReceipt',
+  'inFlightAssetHash', 'previousReceipt', 'draftRemoteHash',
 ];
 const MEDIA_FIELDS = ['referenceHash', 'assetHash', 'id', 'url'];
 const BASE_SET = new Set(BASE_FIELDS);
@@ -116,6 +116,8 @@ function validRecord(record, expectedNoteID, site, allowPreviousReceipt = true) 
     if (!['updating-draft', 'publishing', 'updating-post'].includes(record.stage)
         || !HASH.test(record.expectedBodyHash)) return false;
   }
+  if (Object.hasOwn(record, 'draftRemoteHash')
+      && (!['draft-created', 'updating-draft'].includes(record.stage) || !HASH.test(record.draftRemoteHash))) return false;
   const hasFlight = Object.hasOwn(record, 'inFlightAssetHash');
   if (record.stage === 'uploading-media') {
     if (!hasFlight || !HASH.test(record.inFlightAssetHash)) return false;
