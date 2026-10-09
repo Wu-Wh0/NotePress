@@ -145,7 +145,7 @@ class BlogPreviewView extends ItemView {
     } else {
       this.infoEl.createSpan({ text: '尚未设置站点' });
     }
-    const stateText = preview?.needsCheck ? '待核对'
+    const stateText = preview?.manualRequired ? '需人工核对' : preview?.needsCheck ? '待核对'
       : preview?.dirty ? '有未发布修改'
         : preview?.publishedLink ? '已发布' : '本地预览';
     this.infoEl.createSpan({ text: ` · ${stateText}` });
@@ -154,7 +154,7 @@ class BlogPreviewView extends ItemView {
     this.feedbackEl.setText(issueText);
     this.publishButton.setText(preview?.publishedLink ? '更新文章' : '发布文章');
     this.publishButton.disabled = this.busy || !preview?.canPublish || preview?.needsCheck === true;
-    this.checkButton.disabled = this.busy || preview?.needsCheck !== true;
+    this.checkButton.disabled = this.busy || preview?.needsCheck !== true || preview?.manualRequired === true;
     if (this.frame && preview) this.frame.srcdoc = buildFrameDocument(preview.html, localKatexCss());
   }
 

@@ -182,6 +182,11 @@ test('CommonJS plugin entry registers native preview, command, settings, and a s
   assert.equal(view.checkButton.disabled, true);
   assert.equal(notices.length, 0);
 
+  view.update({ html: '<p>synthetic</p>', siteUrl: 'https://blog.example', canPublish: false, needsCheck: true, manualRequired: true });
+  assert.equal(view.publishButton.disabled, true);
+  assert.equal(view.checkButton.disabled, true);
+  assert.match(view.infoEl.children.map(child => child.textContent).join(''), /人工核对/);
+
   await view.onClose();
   await plugin.onunload();
 });

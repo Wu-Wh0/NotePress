@@ -178,6 +178,10 @@ test('an indeterminate create remains pending and is never automatically created
   assert.equal(first.status, 'needs-check');
   assert.equal(second.status, 'needs-check');
   assert.equal(status.status, 'needs-check');
+  assert.equal(first.manualRequired, true);
+  assert.equal(second.manualRequired, true);
+  assert.equal(status.manualRequired, true);
+  assert.equal(status.reason, 'create-result-unavailable');
   assert.equal(f.state.calls.filter(([name]) => name === 'createPost').length, 1);
   assert.equal(f.state.posts.size, 0);
 });
@@ -216,6 +220,25 @@ test('an uncertain final publish is reconciled by exact readback without another
   assert.equal(repeated.status, 'published');
   assert.equal(f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length, callsAfterPublish);
   assert.equal(f.records.get('note-17').stage, 'completed');
+});
+
+test('uncertain media remains explicitly manual across cold publisher recovery without remote writes', async () => {
+  const f = fixture();
+  const publicationPlan = plan({ source: '![[cover.png]]', images: [{ sourcePath: 'cover.png', bytes: Buffer.from('synthetic'), mime: 'image/png' }] });
+  const upload = f.client.uploadMedia;
+  f.client.uploadMedia = async (...args) => { await upload(...args); throw new Error('synthetic_lost_ack'); };
+  const first = await createPublisher({ client: f.client, store: f.store, siteUrl }).publish(publicationPlan);
+  assert.equal(first.manualRequired, true);
+  const record = structuredClone(f.records.get('note-17'));
+  const calls = f.state.calls.length;
+  const cold = createPublisher({ client: f.client, store: f.store, siteUrl });
+  const checked = await cold.checkStatus('note-17', publicationPlan);
+  assert.equal(checked.reason, 'media-result-unavailable');
+  assert.equal(checked.manualRequired, true);
+  assert.equal(f.state.calls.length, calls);
+  assert.deepEqual(f.records.get('note-17'), record);
+  assert.equal((await cold.publish(publicationPlan)).manualRequired, true);
+  assert.equal(f.state.calls.filter(([name]) => name === 'uploadMedia').length, 1);
 });
 
 test('native plain permalink URLs are accepted for draft and published readback', async () => {

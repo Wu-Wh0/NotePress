@@ -86,6 +86,23 @@ test('settings whitelist drops plaintext or unknown fields and never promotes th
   }), { siteUrl: 'https://blog.example', username: 'writer', secretRef: 'wp-password' });
 });
 
+test('manual reconciliation is visible after reload and does not promise automatic checking', async () => {
+  for (const stage of ['creating', 'uploading-media']) {
+    const f = fixture({ store: { async load() { return { siteUrl: 'https://blog.example', stage, media: [] }; }, async save() {} },
+      publisherHooks: {
+        publish: async () => ({ status: 'needs-check', manualRequired: true }),
+        checkStatus: async () => ({ status: 'needs-check', manualRequired: true }),
+      } });
+    const preview = await f.controller.refresh();
+    assert.equal(preview.manualRequired, true);
+    assert.equal(preview.canPublish, false);
+    assert.equal(preview.issues.some(issue => issue.code === 'manual_check'), true);
+    assert.match((await f.controller.publish()).message, /人工核对/);
+    assert.match((await f.controller.checkStatus()).message, /人工核对/);
+    f.controller.dispose();
+  }
+});
+
 test('preview resolves only the selected note image and never probes or writes', async () => {
   const f = fixture({ source: '正文 ![cover](assets/pic.png)', files: { 'notes/assets/pic.png': Buffer.from('image') } });
   const preview = await f.controller.refresh();

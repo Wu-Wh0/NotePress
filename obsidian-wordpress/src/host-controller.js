@@ -118,6 +118,7 @@ function issueMessage(code) {
     connection_failed: '连接失败，请检查设置。',
     publish_failed: '未能完成发布，请检查文章和连接设置。',
     needs_check: '发布结果待核对，请点击“核对结果”。',
+    manual_check: '写入结果无法自动确认，请在 WordPress 人工核对；为避免重复，已暂停发布。不要删除发布记录后重试。',
     conflict: '站点文章已变化，未覆盖。',
     published: '发布结果已核对。',
     blocked: '当前内容未发布。',
@@ -280,6 +281,7 @@ function createHostController(deps = {}) {
       return {
         receipt: completed ? { link, dirty, needsCheck: false } : {
           link: null, dirty: false, needsCheck: record.stage !== 'completed',
+          manualRequired: ['creating', 'uploading-media'].includes(record.stage),
         },
         store,
       };
@@ -372,13 +374,14 @@ function createHostController(deps = {}) {
       const preview = {
         status: snapshot.issueCodes.length ? 'warning' : 'ready',
         html: snapshot.html,
-        issues: publicIssues(snapshot.issueCodes),
+        issues: publicIssues([...snapshot.issueCodes, ...(snapshot.receipt?.manualRequired ? ['manual_check'] : [])]),
         noteID,
-        canPublish: snapshot.issueCodes.length === 0,
+        canPublish: snapshot.issueCodes.length === 0 && snapshot.receipt?.needsCheck !== true,
         siteUrl: strictSiteLink(settings.siteUrl)?.value || '',
         publishedLink: snapshot.receipt?.link || '',
         dirty: snapshot.receipt?.dirty === true,
         needsCheck: snapshot.receipt?.needsCheck === true,
+        manualRequired: snapshot.receipt?.manualRequired === true,
       };
       onPreview(preview);
       return preview;
@@ -486,7 +489,7 @@ function createHostController(deps = {}) {
       catch { response = { status: 'blocked', reason: 'publish_failed' }; }
       if (!await verifySnapshot(snapshot)) return { status: 'blocked', reason: 'input_changed', message: issueMessage('input_changed') };
       onAction({ busy: true, result: response, siteUrl: strictSiteLink(settings.siteUrl)?.value || '' });
-      return { ...response, message: issueMessage(response?.status === 'needs-check' ? 'needs_check' : response?.status === 'conflict' ? 'conflict' : response?.status === 'published' ? 'published' : 'publish_failed') };
+      return { ...response, message: issueMessage(response?.manualRequired ? 'manual_check' : response?.status === 'needs-check' ? 'needs_check' : response?.status === 'conflict' ? 'conflict' : response?.status === 'published' ? 'published' : 'publish_failed') };
     });
   }
 
@@ -513,7 +516,7 @@ function createHostController(deps = {}) {
       catch { response = { status: 'needs-check', reason: 'check_failed' }; }
       if (!await verifySnapshot(snapshot)) return { status: 'needs-check', reason: 'input_changed', message: issueMessage('needs_check') };
       onAction({ busy: true, result: response, siteUrl: strictSiteLink(settings.siteUrl)?.value || '' });
-      return { ...response, message: issueMessage(response?.status === 'published' ? 'published' : response?.status === 'conflict' ? 'conflict' : 'needs_check') };
+      return { ...response, message: issueMessage(response?.manualRequired ? 'manual_check' : response?.status === 'published' ? 'published' : response?.status === 'conflict' ? 'conflict' : 'needs_check') };
     });
   }
 

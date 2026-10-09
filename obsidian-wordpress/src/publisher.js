@@ -234,7 +234,9 @@ function createPublisher({ client, store, siteUrl } = {}) {
   }
 
   function pending(record, reason = 'operation-uncertain') {
-    return result('needs-check', { ...(Number.isSafeInteger(record?.postID) ? { postID: record.postID } : {}), reason });
+    const manualRequired = record?.stage === 'creating' || record?.stage === 'uploading-media';
+    return result('needs-check', { ...(Number.isSafeInteger(record?.postID) ? { postID: record.postID } : {}),
+      reason, ...(manualRequired ? { manualRequired: true } : {}) });
   }
 
   function buildAssetUrls(prepared, record) {
@@ -272,10 +274,10 @@ function createPublisher({ client, store, siteUrl } = {}) {
       if (!await current(prepared)) return { status: 'blocked', reason: 'input-changed' };
       let media;
       try { media = await client.uploadMedia(image.bytes, image.mime, image.filename); }
-      catch { return { status: 'needs-check', reason: 'media-write-uncertain' }; }
+      catch { return pending(record, 'media-write-uncertain'); }
       if (!Number.isSafeInteger(media?.id) || media.id < 1 || media.author !== record.ownerID
           || media.mime_type !== image.mime || !safeHttpsUrl(media.source_url, site.origin)) {
-        return { status: 'needs-check', reason: 'media-readback-invalid' };
+        return pending(record, 'media-readback-invalid');
       }
       record.media.push({ referenceHash: image.referenceHash, assetHash: image.assetHash, id: media.id, url: media.source_url });
       record.stage = 'media-uploaded';
@@ -313,7 +315,7 @@ function createPublisher({ client, store, siteUrl } = {}) {
         || initialSnapshot.content !== '') return pending(record, 'created-draft-readback-mismatch');
 
     const uploaded = await ensureMedia(prepared, record);
-    if (uploaded.status !== 'ready') return result(uploaded.status, { postID: record.postID, reason: uploaded.reason });
+    if (uploaded.status !== 'ready') return { ...uploaded, postID: record.postID };
     const bodyHtml = render(prepared, record);
     if (bodyHtml === null) return result('draft', { postID: record.postID, reason: 'render-blocked' });
 
@@ -376,7 +378,7 @@ function createPublisher({ client, store, siteUrl } = {}) {
 
     const uploaded = await ensureMedia(prepared, record);
     if (uploaded.status === 'blocked') return stopBeforePostWrite(uploaded.reason);
-    if (uploaded.status !== 'ready') return result(uploaded.status, { postID: record.postID, reason: uploaded.reason });
+    if (uploaded.status !== 'ready') return { ...uploaded, postID: record.postID };
     const bodyHtml = render(prepared, record);
     if (bodyHtml === null) return stopBeforePostWrite('render-blocked');
     record.expectedBodyHash = sha256(Buffer.from(bodyHtml, 'utf8'));
@@ -439,8 +441,11 @@ function createPublisher({ client, store, siteUrl } = {}) {
     return serialize(noteID, async () => {
       let record;
       try { record = await store.load(noteID); } catch { return result('needs-check', { reason: 'journal-unavailable' }); }
-      if (!record || !Number.isSafeInteger(record.postID)) return result('needs-check');
+      if (!record) return result('needs-check');
       if (!validJournal(record, noteID, site.value) || record.ownerID < 1) return result('needs-check', { postID: record.postID, reason: 'journal-invalid' });
+      if (record.stage === 'creating') return pending(record, 'create-result-unavailable');
+      if (record.stage === 'uploading-media') return pending(record, 'media-result-unavailable');
+      if (!Number.isSafeInteger(record.postID)) return result('needs-check');
       if (!plan || plan.noteID !== noteID) return result('needs-check', { postID: record.postID, reason: 'plan-required' });
       const ready = await prepareFor(plan);
       if (ready.error || ready.prepared.planHash !== record.planHash || ready.prepared.ownerID !== record.ownerID) {
