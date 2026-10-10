@@ -1,7 +1,7 @@
 {
-  "id": "wordpress-publisher",
-  "name": "博客发布",
-  "version": "0.1.0",
+  "id": "notepress",
+  "name": "NotePress",
+  "version": "0.2.0",
   "minAppVersion": "1.11.4",
   "description": "在 Obsidian 中预览并发布文章到 WordPress。",
   "author": "",

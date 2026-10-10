@@ -1,6 +1,7 @@
 'use strict';
 
 const obsidian = require('obsidian');
+const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createHostController, sanitizeSettings } = require('./host-controller');
 const { extractImageReferences, renderArticle } = require('./article');
@@ -13,6 +14,73 @@ const { Plugin, ItemView, PluginSettingTab, Setting, SecretComponent, MarkdownVi
 const VIEW_TYPE = 'native-wordpress-preview';
 const CONTENT_SECURITY_POLICY = "default-src 'none'; img-src blob: data:; font-src data:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';";
 const BASE_CSS = 'html,body{margin:0;padding:0;background:var(--background-primary,#17191d);color:var(--text-normal,#e5e7eb);font-family:var(--font-text,system-ui,sans-serif)}body{padding:1.25rem;line-height:1.65}article{max-width:48rem;min-width:0;margin:0 auto;overflow-wrap:anywhere}img{max-width:100%;height:auto}article pre{max-width:100%;box-sizing:border-box;overflow-x:auto;white-space:pre;overflow-wrap:normal}article table{display:block;max-width:100%;overflow-x:auto}.math-scroll{max-width:100%;overflow-x:auto}.wiki-link-text{color:var(--text-accent,#93b4f4)}';
+const LEGACY_PLUGIN_ID = 'wordpress-publisher';
+const NOTEPRESS_PLUGIN_ID = 'notepress';
+
+function sameFilesystemPath(left, right) {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function isWithinPath(parent, child) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+async function inspectSafeEntry(entryPath, vaultRoot) {
+  const absolute = path.resolve(entryPath);
+  if (!isWithinPath(vaultRoot, absolute)) throw new Error('unsafe_plugin_path');
+  const volumeRoot = path.parse(absolute).root;
+  const parts = absolute.slice(volumeRoot.length).split(path.sep).filter(Boolean);
+  let current = volumeRoot;
+  let leaf;
+  for (let index = 0; index < parts.length; index += 1) {
+    current = path.join(current, parts[index]);
+    let info;
+    try { info = await fs.lstat(current); }
+    catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+    if (info.isSymbolicLink()) throw new Error('unsafe_plugin_path');
+    const isLeaf = index === parts.length - 1;
+    if ((!isLeaf && !info.isDirectory()) || (isLeaf && !info.isDirectory() && !info.isFile())) {
+      throw new Error('unsafe_plugin_path');
+    }
+    if (!sameFilesystemPath(await fs.realpath(current), current)) throw new Error('unsafe_plugin_path');
+    leaf = info;
+  }
+  return leaf;
+}
+
+async function inspectLegacyInstallation(adapter, configDir, pluginId) {
+  if (pluginId !== NOTEPRESS_PLUGIN_ID) return { blocked: false, reason: 'not-notepress' };
+  if (typeof FileSystemAdapter !== 'function' || !(adapter instanceof FileSystemAdapter)
+      || typeof adapter.getBasePath !== 'function') return { blocked: false, reason: 'unsupported-adapter' };
+  try {
+    const basePath = adapter.getBasePath();
+    if (typeof basePath !== 'string' || !path.isAbsolute(basePath)
+        || typeof configDir !== 'string' || !configDir || path.isAbsolute(configDir)
+        || configDir.split(/[\\/]/u).some(part => part === '..')) throw new Error('unsafe_plugin_path');
+    const vaultRoot = path.resolve(basePath);
+    const pluginsPath = path.resolve(vaultRoot, configDir, 'plugins');
+    if (!isWithinPath(vaultRoot, pluginsPath)) throw new Error('unsafe_plugin_path');
+    const legacyPath = path.join(pluginsPath, LEGACY_PLUGIN_ID);
+    const currentPath = path.join(pluginsPath, NOTEPRESS_PLUGIN_ID);
+    const legacyInfo = await inspectSafeEntry(legacyPath, vaultRoot);
+    if (!legacyInfo) return { blocked: false, reason: 'clean' };
+    if (!legacyInfo.isDirectory()) return { blocked: true, reason: 'conflict' };
+    const currentInfo = await inspectSafeEntry(currentPath, vaultRoot);
+    const currentJournal = await inspectSafeEntry(path.join(currentPath, 'journal'), vaultRoot);
+    if (currentInfo || currentJournal) return { blocked: true, reason: 'conflict' };
+    const legacyEntries = await fs.readdir(legacyPath);
+    if (legacyEntries.length > 0) return { blocked: true, reason: 'legacy-data' };
+    return { blocked: false, reason: 'clean' };
+  } catch {
+    return { blocked: true, reason: 'unsafe-state' };
+  }
+}
 
 function pluginSettings(value) {
   const source = value && typeof value === 'object' ? value : {};
@@ -290,8 +358,10 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   async onload() {
-    const stored = await this.loadData();
+    this.legacyInstallState = await inspectLegacyInstallation(this.app?.vault?.adapter, this.app?.vault?.configDir, this.manifest?.id);
+    const stored = this.legacyInstallState.blocked ? null : await this.loadData();
     this.settings = pluginSettings(stored);
+    if (this.legacyInstallState.blocked) new Notice(this.text('notice.legacyInstallMigration'), 8000);
     const hasUnknownSettings = stored && typeof stored === 'object' && !Array.isArray(stored)
       && Object.keys(stored).some((key) => !['siteUrl', 'username', 'secretRef', 'previewCssPath', 'uiLanguage'].includes(key));
     if (hasUnknownSettings) {
@@ -343,6 +413,11 @@ class NativeWordPressPlugin extends Plugin {
       getStore: (settings) => this.getJournalStore(settings),
       pathExists: (oldPath) => !!this.app.vault.getAbstractFileByPath(oldPath),
       onPreview: (preview) => {
+        if (this.legacyInstallState.blocked) {
+          const migrationIssue = { code: 'legacy_install_migration', message: issueMessage(this.settings.uiLanguage, 'legacy_install_migration') };
+          preview = { ...preview, status: 'warning', issues: [migrationIssue, ...(preview.issues || []).filter(issue => issue.code !== migrationIssue.code)],
+            canPublish: false, canRestore: false, needsCheck: false, manualRequired: false };
+        }
         this.lastPreview = preview;
         this.currentView?.update(preview);
       },
@@ -382,6 +457,7 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   getJournalStore(settings) {
+    if (this.legacyInstallState?.blocked) return null;
     const siteUrl = settings.siteUrl;
     if (!siteUrl) return null;
     if (this.journalStores.has(siteUrl)) return this.journalStores.get(siteUrl);
@@ -464,7 +540,12 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   async updateSetting(key, value) {
-    if (this.unloaded || !['siteUrl', 'username', 'secretRef', 'previewCssPath'].includes(key)) return;
+    if (this.unloaded) return;
+    if (this.legacyInstallState?.blocked) {
+      new Notice(this.text('notice.legacyInstallMigration'), 8000);
+      return;
+    }
+    if (!['siteUrl', 'username', 'secretRef', 'previewCssPath'].includes(key)) return;
     this.settings = pluginSettings({ ...this.settings, [key]: value });
     this.controller.setSettings();
     if (key !== 'previewCssPath') {
@@ -482,6 +563,10 @@ class NativeWordPressPlugin extends Plugin {
 
   async updateLocale(value) {
     if (this.unloaded) return;
+    if (this.legacyInstallState?.blocked) {
+      new Notice(this.text('notice.legacyInstallMigration'), 8000);
+      return;
+    }
     const uiLanguage = normalizeLocale(value);
     if (uiLanguage === this.settings.uiLanguage) return;
     this.settings = { ...this.settings, uiLanguage };
@@ -499,6 +584,10 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   async runAction(action) {
+    if (this.legacyInstallState?.blocked) {
+      new Notice(this.text('notice.legacyInstallMigration'), 8000);
+      return;
+    }
     if (!this.lastPreview || (action === 'checkStatus'
       ? this.lastPreview.needsCheck !== true || this.lastPreview.manualRequired === true
       : !this.lastPreview.canPublish || this.lastPreview.needsCheck === true)) {

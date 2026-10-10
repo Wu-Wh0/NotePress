@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { build } = require('../build.mjs');
+const { build, DEFAULT_OUTPUT } = require('../build.mjs');
 
 const root = path.resolve(__dirname, '..');
 const distRoot = path.join(root, 'dist');
@@ -68,13 +68,18 @@ test('plugin metadata, npm lock and Obsidian version compatibility stay synchron
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
   const versions = JSON.parse(fs.readFileSync(path.join(root, 'versions.json'), 'utf8'));
 
-  assert.equal(packageJson.version, '0.1.0');
-  assert.equal(manifest.id, 'wordpress-publisher');
-  assert.equal(manifest.name, '博客发布');
-  assert.equal(manifest.version, '0.1.0');
+  assert.equal(packageJson.name, 'obsidian-notepress');
+  assert.equal(packageJson.version, '0.2.0');
+  assert.equal(packageLock.name, packageJson.name);
+  assert.equal(packageLock.packages[''].name, packageJson.name);
+  assert.equal(manifest.id, 'notepress');
+  assert.equal(manifest.name, 'NotePress');
+  assert.equal(manifest.version, '0.2.0');
   assert.equal(manifest.minAppVersion, '1.11.4');
   assert.equal(manifest.isDesktopOnly, true);
-  assert.deepEqual(versions, { '0.1.0': '1.11.4' });
+  assert.deepEqual(versions, { '0.2.0': '1.11.4' });
+  assert.equal(DEFAULT_OUTPUT, path.join(root, 'dist', 'notepress'));
+  assert.equal(path.basename(`${DEFAULT_OUTPUT}.zip`), 'notepress.zip');
   assert.deepEqual(packageLock.packages[''].dependencies, packageJson.dependencies);
   assert.deepEqual(packageLock.packages[''].devDependencies, packageJson.devDependencies);
   assert.equal(packageLock.packages['node_modules/esbuild'].version, '0.28.2');

@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict');
 const Module = require('node:module');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -106,7 +108,10 @@ class FakeSecretComponent {
 }
 
 class FakeMarkdownView {}
-class FakeFileSystemAdapter { getBasePath() { return 'C:/synthetic-vault'; } }
+class FakeFileSystemAdapter {
+  constructor(basePath = 'C:/synthetic-vault') { this.basePath = basePath; }
+  getBasePath() { return this.basePath; }
+}
 const notices = [];
 class FakeNotice { constructor(message) { notices.push(message); } }
 const fakeObsidian = {
@@ -137,7 +142,7 @@ function loadMainWithSyntheticModules() {
   finally { Module._load = originalLoad; }
 }
 
-function makeApp() {
+function makeApp(basePath = 'C:/synthetic-vault') {
   const note = new FakeTFile('Drafts/post.md');
   const listeners = { workspace: {}, vault: {} };
   const markdownView = { file: note, editor: { getValue: () => '# Preview body' } };
@@ -166,7 +171,7 @@ function makeApp() {
     app: {
       workspace,
       vault: {
-        adapter: new FakeFileSystemAdapter(),
+        adapter: new FakeFileSystemAdapter(basePath),
         configDir: '.obsidian',
         cachedRead: async () => { throw new Error('cachedRead should not be used for active editor'); },
         readBinary: async () => new ArrayBuffer(0),
@@ -178,6 +183,162 @@ function makeApp() {
     },
   };
 }
+
+function makeMigrationFixture(t) {
+  const scratch = process.env.WORDPRESS_TEST_SCRATCH || os.tmpdir();
+  fs.mkdirSync(scratch, { recursive: true });
+  const vaultPath = fs.realpathSync.native(fs.mkdtempSync(path.join(scratch, 'notepress-migration-')));
+  t.after(() => fs.rmSync(vaultPath, { recursive: true, force: true }));
+  const plugins = path.join(vaultPath, '.obsidian', 'plugins');
+  return {
+    vaultPath,
+    plugins,
+    legacy: path.join(plugins, 'wordpress-publisher'),
+    current: path.join(plugins, 'notepress'),
+    legacyJournal: path.join(plugins, 'wordpress-publisher', 'journal'),
+    currentJournal: path.join(plugins, 'notepress', 'journal'),
+  };
+}
+
+test('NotePress blocks legacy journal state without reading it or creating a new journal', async (t) => {
+  const paths = makeMigrationFixture(t);
+  fs.mkdirSync(paths.legacyJournal, { recursive: true });
+  const oldData = Buffer.from('{"secretRef":"synthetic-legacy-reference"}');
+  const oldJournal = Buffer.from('{"journal":"preserve-these-bytes"}');
+  fs.writeFileSync(path.join(paths.legacy, 'data.json'), oldData);
+  fs.writeFileSync(path.join(paths.legacyJournal, 'journal-synthetic.json'), oldJournal);
+
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp(paths.vaultPath);
+  let secretReads = 0;
+  app.secretStorage.getSecret = () => { secretReads += 1; return 'synthetic-only'; };
+  const plugin = new main(app, { id: 'notepress' });
+  let settingsReads = 0;
+  plugin.loadData = async () => { settingsReads += 1; throw new Error('settings must not be loaded during migration guard'); };
+  const fsPromises = require('node:fs/promises');
+  const originalReadFile = fsPromises.readFile;
+  let legacyContentReads = 0;
+  fsPromises.readFile = async (filename, ...args) => {
+    if (path.resolve(String(filename)).startsWith(path.resolve(paths.legacy))) {
+      legacyContentReads += 1;
+      throw new Error('legacy file contents must not be read');
+    }
+    return originalReadFile(filename, ...args);
+  };
+  try {
+    await plugin.onload();
+    await plugin.styleRefresh;
+    await plugin.controller.refresh();
+    assert.equal(plugin.lastPreview.canPublish, false);
+    assert.equal(plugin.lastPreview.issues[0].code, 'legacy_install_migration');
+    assert.match(plugin.lastPreview.issues[0].message, /wordpress-publisher|迁移|migration/i);
+    assert.equal(plugin.getJournalStore(plugin.settings), null);
+    const result = await plugin.controller.publish();
+    assert.equal(result.status, 'blocked');
+    assert.equal(result.reason, 'store_unavailable');
+    await plugin.runAction('publish');
+    assert.match(notices.at(-1), /wordpress-publisher|迁移|migration/i);
+  } finally {
+    fsPromises.readFile = originalReadFile;
+    await plugin.onunload();
+    notices.length = 0;
+  }
+  assert.equal(legacyContentReads, 0);
+  assert.equal(settingsReads, 0);
+  assert.equal(secretReads, 0);
+  assert.equal(fs.existsSync(paths.currentJournal), false);
+  assert.deepEqual(fs.readFileSync(path.join(paths.legacy, 'data.json')), oldData);
+  assert.deepEqual(fs.readFileSync(path.join(paths.legacyJournal, 'journal-synthetic.json')), oldJournal);
+});
+
+test('NotePress preserves settings and migration files when settings change during a directory conflict', async (t) => {
+  const paths = makeMigrationFixture(t);
+  fs.mkdirSync(paths.legacyJournal, { recursive: true });
+  fs.mkdirSync(paths.currentJournal, { recursive: true });
+  const oldData = Buffer.from('{"legacy":"preserve"}');
+  const oldJournal = Buffer.from('{"journal":"legacy"}');
+  const currentData = Buffer.from('{"siteUrl":"https://saved.example","username":"saved-writer","secretRef":"saved-ref","uiLanguage":"en"}');
+  const currentJournal = Buffer.from('{"journal":"current-preserve"}');
+  const currentPackage = Buffer.from('synthetic NotePress bundle');
+  const oldDataPath = path.join(paths.legacy, 'data.json');
+  const oldJournalPath = path.join(paths.legacyJournal, 'journal-legacy.json');
+  const currentDataPath = path.join(paths.current, 'data.json');
+  const currentJournalPath = path.join(paths.currentJournal, 'journal-current.json');
+  fs.writeFileSync(oldDataPath, oldData);
+  fs.writeFileSync(oldJournalPath, oldJournal);
+  fs.writeFileSync(currentDataPath, currentData);
+  fs.writeFileSync(currentJournalPath, currentJournal);
+  fs.writeFileSync(path.join(paths.current, 'main.js'), currentPackage);
+
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp(paths.vaultPath);
+  const plugin = new main(app, { id: 'notepress' });
+  let saveCalls = 0;
+  plugin.saveData = async (value) => {
+    saveCalls += 1;
+    fs.writeFileSync(currentDataPath, JSON.stringify(value));
+  };
+  await plugin.onload();
+  await plugin.styleRefresh;
+  await plugin.controller.refresh();
+  assert.equal(plugin.lastPreview.canPublish, false);
+  assert.equal(plugin.lastPreview.issues[0].code, 'legacy_install_migration');
+  assert.equal(plugin.getJournalStore(plugin.settings), null);
+  const originalSettings = { ...plugin.settings };
+  const initialNoticeCount = notices.length;
+
+  await plugin.updateSetting('username', 'changed-writer');
+  assert.equal(notices.length, initialNoticeCount + 1);
+  assert.match(notices.at(-1), /README/i);
+  await plugin.updateLocale('en');
+  assert.equal(notices.length, initialNoticeCount + 2);
+
+  assert.equal(saveCalls, 0);
+  assert.deepEqual(plugin.settings, originalSettings);
+  assert.match(notices.at(-1), /README/i);
+  assert.deepEqual(fs.readFileSync(oldDataPath), oldData);
+  assert.deepEqual(fs.readFileSync(oldJournalPath), oldJournal);
+  assert.deepEqual(fs.readFileSync(currentDataPath), currentData);
+  assert.deepEqual(fs.readFileSync(currentJournalPath), currentJournal);
+  assert.deepEqual(fs.readFileSync(path.join(paths.current, 'main.js')), currentPackage);
+  await plugin.onunload();
+  notices.length = 0;
+});
+
+test('NotePress without legacy state opens its current journal store normally', async (t) => {
+  const paths = makeMigrationFixture(t);
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp(paths.vaultPath);
+  const plugin = new main(app, { id: 'notepress' });
+  await plugin.onload();
+  const diagnostic = () => {
+    const state = plugin.legacyInstallState || {};
+    const reasons = ['clean', 'not-notepress', 'unsupported-adapter', 'conflict', 'legacy-data', 'unsafe-state'];
+    const canonical = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+    const ancestors = [];
+    for (let current = paths.vaultPath; ; current = path.dirname(current)) {
+      try {
+        const stat = fs.lstatSync(current);
+        const realpath = fs.realpathSync.native(current);
+        ancestors.push({ path: current, isDirectory: stat.isDirectory(), isSymbolicLink: stat.isSymbolicLink(),
+          mode: stat.mode, dev: stat.dev, ino: stat.ino, realpath, realpathMatches: canonical(realpath) === canonical(current) });
+      } catch (error) { ancestors.push({ path: current, error: error.code || 'unknown' }); }
+      if (path.dirname(current) === current) break;
+    }
+    return JSON.stringify({
+      legacyInstallState: { blocked: typeof state.blocked === 'boolean' ? state.blocked : null,
+        reason: reasons.includes(state.reason) ? state.reason : typeof state.reason === 'string' ? 'other' : null },
+      settingsFieldPresence: Object.fromEntries(['siteUrl', 'username', 'secretRef', 'previewCssPath', 'uiLanguage']
+        .map(key => [key, Object.hasOwn(plugin.settings || {}, key)])),
+      vaultPath: paths.vaultPath, ancestors,
+    });
+  };
+  assert.equal(plugin.legacyInstallState?.blocked, false,
+    plugin.legacyInstallState?.blocked === false ? undefined : diagnostic());
+  const store = plugin.getJournalStore(plugin.settings);
+  assert.ok(store, store ? undefined : diagnostic());
+  await plugin.onunload();
+});
 
 test('openPreview coalesces concurrent opens and reveals the existing preview leaf', async () => {
   const main = loadMainWithSyntheticModules();
