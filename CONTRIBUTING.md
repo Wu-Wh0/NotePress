@@ -5,7 +5,7 @@ This repository is a single-author Obsidian desktop plugin. Contributions are re
 ## Ground rules
 
 - The product boundary in `README.md` is authoritative: single author, desktop Obsidian, native WordPress HTTPS REST only. Do not introduce a custom WordPress plugin, a browser approval step, a compiler pin, or a CLI/SSH/always-on bridge as an author requirement.
-- `legacy/publication-v1/` is a historical implementation kept for reference. It is not an installation dependency of the current plugin, and changes there are exceptional.
+- The current product is the Obsidian plugin documented in `README.md`; keep product, build and release changes within that scope.
 - Never commit credentials, application passwords, cookies, nonces, vault absolute paths, databases, generated install files or private runtime evidence. Plugin settings store a secret reference only.
 - Do not repeat an indeterminate publication to test it. Unknown create or media outcomes stay blocked until a human checks the exact remote state.
 
@@ -37,4 +37,4 @@ Local checks, synthetic TLS, real WordPress HTTP, the native Obsidian host, an a
 
 ## Commits and releases
 
-Conventional-ish prefixes are used in history (`feat:`, `fix:`, `docs:`, `test:`, `ci:`, `chore:`). Releases are cut by tagging `v<version>` after the version constants in `build.mjs`, `package.json`, `package-lock.json`, `manifest.json` and `versions.json` are updated together; the tag workflow builds and attaches `wordpress-publisher.zip`.
+Conventional-ish prefixes are used in history (`feat:`, `fix:`, `docs:`, `test:`, `ci:`, `chore:`). Release tags use bare numeric semantic versions such as `0.2.0` (no `v` prefix). Keep `build.mjs`, `package.json`, both `package-lock.json` version fields, `manifest.json` and `versions.json` synchronized. The workflow prepares a new GitHub Draft only; it never publishes or updates an existing release. It uploads and verifies five assets: `main.js`, `manifest.json`, `styles.css`, `wordpress-publisher.zip` and `SHA256SUMS.txt`. A maintainer must review and manually publish the Draft as a separate approval step.
