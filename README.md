@@ -1,40 +1,128 @@
-# Obsidian WordPress publisher
+# NotePress
 
-A desktop Obsidian plugin for local article previews and explicit publication through WordPress's native HTTPS REST API. No custom WordPress plugin, browser approval step, external Node runtime or WSL is required by the installed plugin.
+English | [简体中文](README.zh-CN.md)
 
-The built-in local preview provides a readable blog layout; it is not a pixel-accurate copy of an arbitrary production WordPress theme. Local automated checks alone do not establish native Obsidian behavior or deployed-theme compatibility.
+Write in Obsidian, preview locally, and publish to your WordPress blog without leaving your vault.
 
-## Manual installation from a GitHub Release
+NotePress is a desktop Obsidian plugin that uses WordPress's native HTTPS REST API. Your explicit publish click authorizes the selected article and its referenced local images. Editing and previewing never upload content. You do not need a custom WordPress plugin, an external runtime, or a second browser approval step.
 
-1. Download `wordpress-publisher.zip` from the GitHub Release, or download its three installation files: `main.js`, `manifest.json` and `styles.css`.
-2. Place those three files directly in `<vault>/.obsidian/plugins/wordpress-publisher/` (extract the ZIP there if using it).
-3. Use Obsidian desktop 1.11.4 or later, enable the plugin, configure the WordPress HTTPS site and author username, and select an application password through Obsidian's secret storage. Plugin settings retain only the secret reference. Choose **简体中文** or **English** for the interface (default: Simplified Chinese); this does not change article content or site settings. The plugin is not listed in the Obsidian community marketplace.
-4. Open the article and use **博客预览**. Editing and previewing never upload content. **发布文章** authorizes this article and its referenced local images; after confirmed publication, the button becomes **更新文章**. **核对结果** reads an uncertain result without retrying a write.
+> Use [published releases](https://github.com/Wu-Wh0/Wh0-0-Blog/releases) for installable packages. NotePress 0.2.0 uses the new `notepress` ID. If you have version 0.1.0 (`wordpress-publisher`), read the migration section before installing it.
+
+[Installation](#installation) · [First publish](#first-publish) · [Upgrading from 0.1.0](#upgrading-from-010) · [Supported content](#supported-content) · [Development](#development)
+
+## What it does
+
+- A local blog-style preview, with formulas, tables, code, and referenced images.
+- Explicit publishing and same-post updates, with remote readback before reporting success.
+- Conflict detection and conservative recovery when a write result is uncertain.
+- Explicit association recovery after a published note is renamed or moved.
+- Simplified Chinese and English interface options, plus optional local preview CSS.
+
+NotePress is not a two-way sync tool. Your Obsidian note remains the source of the article, and the preview does not reproduce every WordPress theme pixel for pixel.
+
+## Requirements
+
+- Obsidian **desktop 1.11.4 or later**; mobile is not supported.
+- A WordPress site reachable over HTTPS, with REST API and application passwords enabled.
+- A WordPress author account with permissions to publish posts and upload files.
+
+The plugin is not currently listed in the Obsidian community marketplace.
+
+## Installation
+
+### With BRAT
+
+To install a published NotePress version:
+
+1. Install and enable [BRAT](https://github.com/TfTHacker/obsidian42-brat) from the Obsidian community marketplace.
+2. In BRAT settings, add the repository `Wu-Wh0/Wh0-0-Blog` and select the published NotePress version.
+3. Enable NotePress in **Settings → Community plugins**.
+
+The repository is public, so normal downloads do not require a GitHub token. Start with manual update checks; review release notes before upgrading. If you already use version 0.1.0, migrate first rather than installing a second copy alongside it.
+
+### Manual installation
+
+1. Download `notepress.zip` from the NotePress [release](https://github.com/Wu-Wh0/Wh0-0-Blog/releases), or download `main.js`, `manifest.json`, and `styles.css` separately.
+2. Put those three files directly in `<vault>/.obsidian/plugins/notepress/`. Do not leave an extra nested directory after extracting the ZIP. If you use a custom Obsidian configuration directory, replace `.obsidian` with that directory.
+3. Restart Obsidian and enable NotePress in **Settings → Community plugins**.
+
+## First publish
+
+1. Open NotePress settings. Choose **简体中文** or **English**; the default is Chinese.
+2. Enter your WordPress HTTPS root URL and author username.
+3. Select an application password through Obsidian's secure storage, then click **Test connection**.
+4. Open a Markdown article and run **Open blog preview**. Resolve any warnings shown in the preview.
+5. Click **Publish article**. After the result is verified, use **View article** to open the post on your blog.
+
+Later edits stay local until you click **Update article**. NotePress uses the recorded post ID rather than creating another article. Changing the interface language does not translate your article or change connection settings.
 
 ### WordPress application password
 
 An application password lets this plugin act as your WordPress author through the API: upload referenced images, publish and update articles. It is **not your website login password**, and you can revoke it separately. It uses the account's existing permissions, not a plugin-specific restricted permission set.
 
 1. In your site's WordPress dashboard, open **Users → Profile → Application Passwords** and create an entry for Obsidian. WordPress shows the generated password only once.
-2. In the plugin's **应用程序密码** selector, add that password to Obsidian's secret storage, save it and select it. The secret name is only a local label: choose any name you recognize. Adding a local secret does not generate a WordPress application password. Plugin settings save only the reference, not the password.
-3. Enter the matching HTTPS site and WordPress username, then use **测试连接**. Do not paste credentials into notes, chat, URLs or logs.
+2. In the plugin's **Application password** selector, add that password to Obsidian's secret storage, save it and select it. The secret name is only a local label: choose any name you recognize. Adding a local secret does not generate a WordPress application password. Plugin settings save only the reference, not the password.
+3. Enter the matching HTTPS site and WordPress username, then use **Test connection**. Do not paste credentials into notes, chat, URLs or logs.
 4. To revoke access, remove this entry under the same WordPress **Application Passwords** section. Deleting an Obsidian secret alone does not revoke server access. If the WordPress section is missing, check that your version supports application passwords, the site uses HTTPS and the site administrator has not disabled them.
 
-The settings page provides this help in a short expandable section; there is no extra setup wizard or server installation.
+The settings page also provides this help in a short expandable section.
 
-Optional **本地预览 CSS** accepts one explicit Vault-relative `.css` path (for example `styles/blog.css`); blank keeps the built-in theme. Files are limited to 128 KiB before and after reading. Custom rules follow built-in preview styles and are never added to publication HTML, uploads or receipts. Creation, changes, deletion, rename and clearing the setting refresh or fall back to built-in styling. Invalid files show a message in the preview. Resource references (`@import`, `url()`, `image-set()`), CSS escapes and `<` are deliberately unsupported; bundled offline KaTeX fonts remain available. Hidden files/folders (including `.obsidian`) are unsupported because normal Vault change events do not cover them. Linked descendants are rejected by real-path checks before the desktop adapter reads CSS; no folders are scanned.
+## Upgrading from 0.1.0
 
-## Supported boundary
+Version 0.1.0 is named 博客发布 and uses the ID `wordpress-publisher`. NotePress 0.2.0 uses `notepress`. This ID change needs a one-time local migration; BRAT installation alone does not move the old plugin's data.
 
-- Markdown paragraphs, headings, lists, tables, code and bounded KaTeX expressions; Obsidian image embeds and Markdown images. Note properties are excluded from publication. Preview title/wrapper and publication body are separate.
-- Local formulas keep the bundled KaTeX styling/fonts. Published formulas use native MathML without site-side JavaScript, CSS or a custom WordPress plugin; modern browsers render them directly. Typography can differ from the preview. A WordPress version or filter that removes formula content leaves a mismatching draft blocked instead of silently publishing it.
-- Wikilinks become visibly marked display text, not exported note contents or vault paths. Non-image note embeds, dynamic plugin queries, raw HTML and hidden Obsidian comments block publication. Literal comment delimiters inside code samples remain literal.
-- Only referenced images are read. Basename references must match the configured attachment location; path-qualified references must match the resolver's exact target. Unresolved or ambiguous paths block publication. Remote images are not downloaded. The sandboxed preview does not load external resources; formula fonts are included offline.
-- Old-site `/images/` URLs or root-relative paths must be deliberately migrated by the author to actual Vault attachments before publication. The plugin does not download old-site images or guess a matching Vault path.
-- Confirmed articles are updated using the same recorded remote ID. Remote changes block overwrite. A durable journal stores hashes, IDs and safe URLs, not article bodies or credentials. For a selected published Markdown note renamed or moved through Obsidian, the plugin saves a site-bound local pending association before offering **恢复关联**. Publish on that path is blocked until the author confirms its former Vault-relative path; the plugin then checks the local completed receipt and reads the exact remote post before activating the association. Confirmation never publishes, uploads, creates or edits Markdown. After recovery, review the preview and click **更新文章** separately. After a cold start or an external move while Obsidian was closed, use the **恢复已发布文章关联** command and enter the former path yourself before publishing; content and title cannot prove identity, so the plugin does not search or automatically claim moved notes. The former path must no longer exist. Association records contain path hashes and stable journal IDs, not readable paths or article text. If local storage cannot save the pending association, the current session blocks publishing, but it cannot retain a new guard across restart.
-- Known-ID empty or fully prepared drafts can be checked without remote writes. Exact owner/status/title/content/plan readback is saved as a draft baseline; after restart, a separate **发布文章** click rechecks that baseline and continues the same ID without repeating creation or acknowledged image uploads. Changed plans or remote drafts remain blocked. Filtered/mismatching content is not accepted or silently published. Uncertain media uploads are not resolved this way; native REST still has no transactional compare-and-swap guarantee.
-- A new draft is created with a temporary `obsidian-create-…` slug as a correlation anchor. If that creation's result is unknown, a later **核对结果** read-only looks the anchor up: exactly one candidate of type `post`, owned by you, still an empty-titled-body draft with that exact slug is adopted under its own ID; zero candidates, more than one candidate, or any mismatch stays blocked as **需人工核对**. The lookup writes nothing remotely and never creates a post, so a lost acknowledgement cannot turn into a second article. The anchor slug is visible in the WordPress admin while the draft exists and is cleared before the final publish; the plugin refuses to report success if a marker remains in the final slug or link. Records written before this anchor existed keep the previous behaviour and stay frozen, and uncertain media stays frozen even when a post ID is known, because a post read cannot prove which upload succeeded; that part is tracked in [issue #15](https://github.com/Wu-Wh0/Wh0-0-Blog/issues/15). Known-ID final publication/post-update uncertainty can still be checked by exact readback. No automatic create retry is provided, and a client-generated identifier does not make native REST writes idempotent. Media can become publicly reachable before article publication; there is no native transaction or atomic compare-and-swap guarantee.
-- Rename/move recovery is limited to an exact completed receipt on the same site and owner. Pending create, media or other operations cannot be moved; a retired path cannot silently reuse the old receipt. A remote change or local association error blocks recovery. Native WordPress REST has no atomic compare-and-swap, so a remote edit can still race after readback; an ordinary explicit update repeats its baseline check. Preview templates remain tracked in [issue #17](https://github.com/Wu-Wh0/Wh0-0-Blog/issues/17).
+**Preserve the entire old plugin directory, including `data.json` and `journal/`.** They contain connection references and publication associations. Losing the journal can make an existing article look unpublished.
+
+Before migration, finish or resolve any pending publication and close Obsidian. Keep a recovery copy of the old plugin directory and `community-plugins.json` outside the active plugin directory. Rename `plugins/wordpress-publisher/` to `plugins/notepress/`, replace only the three installation files with the new release, and replace the enabled ID `wordpress-publisher` with `notepress` in `community-plugins.json`. Preserve all other enabled plugin IDs and existing data files.
+
+If both directories already exist, stop and resolve the conflict; do not merge their journals or enable both copies. After restarting, check the connection settings and the association of a previously published article before clicking Publish or Update. You can then register the repository in BRAT for future updates.
+
+## Supported content
+
+| Content | Behavior |
+| --- | --- |
+| Markdown paragraphs, headings, lists, tables, code | Supported |
+| Inline and block formulas | Local KaTeX preview; native MathML in published content |
+| Obsidian image embeds and Markdown images | Uploads only referenced, resolved local images |
+| Wikilinks | Converts to visibly marked display text; does not export linked notes or vault paths |
+| Note properties | Excluded from publication content |
+| Non-image note embeds, dynamic plugin queries, raw HTML, hidden Obsidian comments | Blocks publication; literal comment delimiters in code stay literal |
+| Remote or ambiguous images | Does not download or guess; asks you to fix the reference |
+
+For old-site image URLs or root-relative `/images/` paths, deliberately move the image into your vault and update the reference. NotePress does not migrate or download these images automatically.
+
+### Local preview CSS
+
+Set **Local preview CSS** to a Vault-relative path such as `styles/blog.css`, or leave it blank for the built-in style. CSS affects only the preview and is never uploaded. Changes refresh locally; invalid or missing files fall back to the built-in style with a warning.
+
+Files must be non-hidden, non-linked CSS files inside the vault and at most 128 KiB. External resource references (`@import`, `url()`, `image-set()`), CSS escapes, and `<` are unsupported. Bundled offline formula fonts remain available.
+
+## Recovery and publishing limits
+
+### Renamed or moved notes
+
+Use **Restore published article association** and confirm the former Vault-relative path. The former path must no longer exist. Recovery requires a completed local receipt on the same site and for the same author; NotePress checks the exact remote post before restoring the local association.
+
+Recovery itself never publishes, uploads, edits your Markdown, or creates another post. Review the preview, then click **Update article** separately. After an external move or a cold start, restore the association before publishing: NotePress cannot prove identity from an article's title or content and does not search your vault to guess it.
+
+### Uncertain results or remote changes
+
+If a write result is uncertain, use **Check result** when available. Do not delete the publishing journal or repeatedly click Publish to force a retry. A remote article change blocks overwrite rather than silently replacing it.
+
+Known-ID drafts and final post writes can be verified by exact readback. New-article creation uses a temporary correlation slug to support read-only checking; a client-generated ID is not a WordPress idempotency guarantee. Older unanchored create records and uncertain image uploads remain blocked for manual checking.
+
+WordPress native REST has no atomic transaction or compare-and-swap guarantee. A remote edit can race after a baseline read, and uploaded media can become publicly reachable before the article is published. Substantive filtering or mismatching content blocks completion rather than being reported as success.
+
+<details>
+<summary>Technical recovery boundaries</summary>
+
+- Only a unique, strictly verified create-anchor candidate can be adopted; lookup never writes remotely or retries creation. Observed ambiguity or an interrupted durable lookup stays blocked. The temporary anchor is cleared before final publication and must not remain in the final slug or link.
+- Known-ID draft continuation requires exact owner, status, title, content, and plan readback. A separate publish click rechecks the baseline and continues that ID without repeating creation or acknowledged uploads.
+- Pending operations cannot be moved to another note association. Retired paths cannot reuse the old receipt. Association records store path hashes and stable IDs, not readable paths or note contents.
+- If local storage cannot save a rename guard, the current session blocks publishing but cannot promise that a new guard survives restart.
+- The durable journal contains hashes, IDs, and safe URLs, not article bodies or credentials. Preview title, wrapper, and CSS are separate from published content.
+
+</details>
 
 ## Development
 
@@ -46,7 +134,7 @@ Tests require Node.js with `node:test`, Git for checkout-attribute verification 
 
 Future release tags use bare numeric semantic versions such as `0.2.0`—no `v` prefix. The workflow requires the tag to match `package.json`, both version fields in `package-lock.json`, and `manifest.json`, and refuses tags whose commit is not reachable from `main`. The existing `0.1.0` release is retained; reusing that tag fails closed whether its release is a draft or already published.
 
-The workflow creates a GitHub Draft only. It never publishes or updates an existing release, and asset uploads do not use clobbering. Before reporting the draft prepared, it validates the ZIP has exactly `main.js`, `manifest.json` and `styles.css`, checks those members against the built files, writes `SHA256SUMS.txt`, uploads all five assets (`main.js`, `manifest.json`, `styles.css`, `wordpress-publisher.zip`, `SHA256SUMS.txt`), then downloads and compares each asset and verifies the checksums. A maintainer must review the draft and manually publish it as a separate approval step.
+The workflow prepares a GitHub Draft only and refuses to overwrite an existing release. It verifies the three installation files, `notepress.zip`, and `SHA256SUMS.txt` by download and byte comparison. A maintainer reviews and publishes the Draft separately. See [CONTRIBUTING.md](CONTRIBUTING.md) for the release checklist.
 
 Dependabot dependency PRs must keep `build.mjs`'s exact `EXPECTED.markdownIt`, `EXPECTED.katex` and `EXPECTED.esbuild` pins synchronized with the approved exact versions in `package.json` and `package-lock.json`; do not weaken the build's pin checks. When changing the plugin version, also synchronize `EXPECTED.packageVersion`, `package.json`, both package-lock version fields, `manifest.json` and `versions.json` before release.
 

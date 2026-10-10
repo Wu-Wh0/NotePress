@@ -1,4 +1,4 @@
-name: Native WordPress plugin build
+name: NotePress plugin build
 on:
   push:
     branches:
@@ -19,7 +19,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: native-wordpress-build-${{ github.workflow }}-${{ github.ref }}
+  group: notepress-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   package:

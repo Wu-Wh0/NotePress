@@ -16,10 +16,10 @@ This plugin holds only a secret *reference* in its settings, but it acts with a 
 - publication-safety violations: silently publishing filtered or mismatching content, treating an indeterminate write as success, retrying or re-creating after an unknown outcome, overwriting a remote change without reading the baseline first;
 - reading vault content the author did not select, including non-image note embeds and unrelated attachments;
 - preview or rendering paths that execute scripts, load remote resources or write to the network without an explicit publish click;
-- installing files outside `<vault>/.obsidian/plugins/wordpress-publisher/` or following a symlinked path.
+- installing files outside `<vault>/.obsidian/plugins/notepress/` or following a symlinked path.
 
 Out of scope: the security of WordPress itself, the author's site configuration, a compromised author account, and the author's own vault permissions.
 
 ## Known limits, not vulnerabilities
 
-Native REST has no transactional or compare-and-swap guarantee, so there is no idempotency for creates. Media can become publicly reachable before the article is published. Note identity follows the vault-relative path, so rename or move reconciliation is not implemented. These are documented in `README.md` and tracked in issues; they are not fixed silently.
+Native REST has no transactional or compare-and-swap guarantee, so there is no idempotency for creates. Media can become publicly reachable before the article is published. Rename/move reconciliation is supported only with an exact completed local receipt, the same site and owner, and the author-provided former path; content is never used for automatic claiming. These are documented in `README.md` and tracked in issues; they are not fixed silently.

@@ -1,4 +1,4 @@
-name: Prepare Draft install package
+name: Prepare NotePress Draft install package
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: native-wordpress-release-${{ github.ref }}
+  group: notepress-release-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   release:
@@ -47,6 +47,7 @@ jobs:
             const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
             const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
             const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+            const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"));
             if (!semver.test(tag)) {
               console.error(`Invalid release tag ${tag}; use bare MAJOR.MINOR.PATCH (no v prefix).`);
               process.exit(1);
@@ -54,6 +55,12 @@ jobs:
             if (packageJson.version !== tag || lock.version !== tag
                 || lock.packages?.[""]?.version !== tag || manifest.version !== tag) {
               console.error(`Release version mismatch: tag=${tag}, package=${packageJson.version}, lock=${lock.version}/${lock.packages?.[""]?.version}, manifest=${manifest.version}.`);
+              process.exit(1);
+            }
+            if (packageJson.name !== "obsidian-notepress" || lock.name !== packageJson.name
+                || lock.packages?.[""]?.name !== packageJson.name || manifest.id !== "notepress"
+                || manifest.name !== "NotePress" || versions?.[tag] !== manifest.minAppVersion) {
+              console.error("Release product identity or versions.json compatibility mapping does not match NotePress.");
               process.exit(1);
             }
             process.stdout.write(`Validated exact release version ${tag}.\n`);
@@ -91,8 +98,8 @@ jobs:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          package_dir="dist/wordpress-publisher"
-          archive="dist/wordpress-publisher.zip"
+          package_dir="dist/notepress"
+          archive="dist/notepress.zip"
           test -s "${package_dir}/main.js"
           test -s "${package_dir}/manifest.json"
           test -s "${package_dir}/styles.css"
@@ -112,10 +119,10 @@ jobs:
             cmp -- "${package_dir}/${name}" "${verify_dir}/${name}"
             cp -- "${package_dir}/${name}" "${asset_dir}/${name}"
           done
-          cp -- "$archive" "${asset_dir}/wordpress-publisher.zip"
+          cp -- "$archive" "${asset_dir}/notepress.zip"
           (
             cd "$asset_dir"
-            sha256sum main.js manifest.json styles.css wordpress-publisher.zip > SHA256SUMS.txt
+            sha256sum main.js manifest.json styles.css notepress.zip > SHA256SUMS.txt
             sha256sum --check SHA256SUMS.txt
           )
           printf 'RELEASE_ASSET_DIR=%s\n' "$asset_dir" >> "$GITHUB_ENV"
@@ -130,7 +137,7 @@ jobs:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          expected_assets=(main.js manifest.json styles.css wordpress-publisher.zip SHA256SUMS.txt)
+          expected_assets=(main.js manifest.json styles.css notepress.zip SHA256SUMS.txt)
           expected_names="$(printf '%s\n' "${expected_assets[@]}" | LC_ALL=C sort)"
           release_list="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[].tag_name')"
           if printf '%s\n' "$release_list" | grep -Fqx -- "$RELEASE_TAG"; then
@@ -149,10 +156,10 @@ jobs:
           notes="$(mktemp "${RUNNER_TEMP}/release-notes.XXXXXX")"
           download_dir="$(mktemp -d "${RUNNER_TEMP}/release-readback.XXXXXX")"
           trap 'rm -f "$notes"; rm -rf "$download_dir" "$RELEASE_ASSET_DIR"' EXIT
-          printf '%s\n' "Desktop Obsidian publishing through the WordPress native HTTPS REST API." "" "Install main.js, manifest.json and styles.css in <vault>/.obsidian/plugins/wordpress-publisher/, or extract wordpress-publisher.zip there." "" "This automation prepares a Draft only. Review the files and checksums, then publish manually after approval." "See README.md for supported behavior and limits." > "$notes"
+          printf '%s\n' "Desktop Obsidian publishing through the WordPress native HTTPS REST API." "" "Install main.js, manifest.json and styles.css in <vault>/.obsidian/plugins/notepress/, or extract notepress.zip there." "" "This automation prepares a Draft only. Review the files and checksums, then publish manually after approval." "See README.md for supported behavior and limits." > "$notes"
 
-          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --target "$release_target_commitish" --draft --title "Obsidian WordPress publisher ${RELEASE_TAG}" --notes-file "$notes"
-          gh release upload "$RELEASE_TAG" "${RELEASE_ASSET_DIR}/main.js" "${RELEASE_ASSET_DIR}/manifest.json" "${RELEASE_ASSET_DIR}/styles.css" "${RELEASE_ASSET_DIR}/wordpress-publisher.zip" "${RELEASE_ASSET_DIR}/SHA256SUMS.txt" --repo "$GITHUB_REPOSITORY"
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --target "$release_target_commitish" --draft --title "NotePress ${RELEASE_TAG}" --notes-file "$notes"
+          gh release upload "$RELEASE_TAG" "${RELEASE_ASSET_DIR}/main.js" "${RELEASE_ASSET_DIR}/manifest.json" "${RELEASE_ASSET_DIR}/styles.css" "${RELEASE_ASSET_DIR}/notepress.zip" "${RELEASE_ASSET_DIR}/SHA256SUMS.txt" --repo "$GITHUB_REPOSITORY"
 
           release_rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[] | [.id, .tag_name] | @tsv')"
           release_ids=()
@@ -190,7 +197,7 @@ jobs:
                 exit 1
               fi
               case "$asset_name" in
-                main.js|manifest.json|styles.css|wordpress-publisher.zip|SHA256SUMS.txt) ;;
+                main.js|manifest.json|styles.css|notepress.zip|SHA256SUMS.txt) ;;
                 *)
                   echo "::error::${phase} release readback included unexpected asset ${asset_name}."
                   exit 1

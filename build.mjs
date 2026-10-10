@@ -7,9 +7,12 @@ import * as esbuild from 'esbuild';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DIST_ROOT = path.join(ROOT, 'dist');
 const PRODUCT_ENTRY = path.join(ROOT, 'src', 'main.js');
-const DEFAULT_OUTPUT = path.join(DIST_ROOT, 'wordpress-publisher');
+const DEFAULT_OUTPUT = path.join(DIST_ROOT, 'notepress');
 const EXPECTED = Object.freeze({
-  packageVersion: '0.1.0',
+  packageName: 'obsidian-notepress',
+  packageVersion: '0.2.0',
+  pluginId: 'notepress',
+  pluginName: 'NotePress',
   minAppVersion: '1.11.4',
   markdownIt: '15.0.2',
   katex: '0.19.0',
@@ -242,18 +245,22 @@ function validateMetadata() {
   const expectedDeps = { 'markdown-it': EXPECTED.markdownIt, katex: EXPECTED.katex };
   const expectedDevDeps = { esbuild: EXPECTED.esbuild };
 
-  if (packageJson.version !== EXPECTED.packageVersion
+  if (packageJson.name !== EXPECTED.packageName || packageJson.version !== EXPECTED.packageVersion
       || packageJson.dependencies?.['markdown-it'] !== expectedDeps['markdown-it']
       || packageJson.dependencies?.katex !== expectedDeps.katex
       || packageJson.devDependencies?.esbuild !== expectedDevDeps.esbuild) fail('dependency_pin_mismatch');
   const locked = lock.packages?.[''];
-  if (lock.lockfileVersion !== 3 || locked?.version !== packageJson.version
+  if (lock.lockfileVersion !== 3 || lock.name !== packageJson.name || locked?.name !== packageJson.name
+      || locked?.version !== packageJson.version
       || !sameRecord(locked.dependencies, packageJson.dependencies)
       || !sameRecord(locked.devDependencies, packageJson.devDependencies)) fail('package_lock_mismatch');
-  if (manifest.id !== 'wordpress-publisher' || manifest.name !== '博客发布'
+  if (manifest.id !== EXPECTED.pluginId || manifest.name !== EXPECTED.pluginName
       || manifest.version !== EXPECTED.packageVersion || manifest.minAppVersion !== EXPECTED.minAppVersion
       || manifest.isDesktopOnly !== true) fail('manifest_invalid');
-  if (Object.keys(versions).length !== 1 || versions[EXPECTED.packageVersion] !== EXPECTED.minAppVersion) fail('versions_invalid');
+  if (!versions || Array.isArray(versions) || typeof versions !== 'object'
+      || Object.keys(versions).length !== 1 || versions[EXPECTED.packageVersion] !== EXPECTED.minAppVersion) {
+    fail('versions_invalid');
+  }
 
   for (const [name, version] of Object.entries({ ...expectedDeps, ...expectedDevDeps })) {
     const metadata = readJson(path.join(ROOT, 'node_modules', name, 'package.json'), 'dependency_missing');
@@ -366,7 +373,7 @@ function parseArgs(args) {
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
     const value = args[index + 1];
-    if ((flag !== '--entry' && flag !== '--out') || !value || value.startsWith('--')) fail('usage: node build.mjs [--entry src/main.js] [--out dist/wordpress-publisher]');
+    if ((flag !== '--entry' && flag !== '--out') || !value || value.startsWith('--')) fail('usage: node build.mjs [--entry src/main.js] [--out dist/notepress]');
     const resolved = path.resolve(ROOT, value);
     if (flag === '--entry') options.entryFile = resolved;
     else options.outputDir = resolved;
