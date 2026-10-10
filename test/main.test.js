@@ -10,6 +10,7 @@ class FakeElement {
     this.tagName = tag;
     this.children = [];
     this.attributes = { ...(options.attr || {}) };
+    if (options.href) this.attributes.href = options.href;
     this.textContent = options.text || '';
     this.listeners = {};
     this.disabled = false;
@@ -51,8 +52,9 @@ class FakePlugin {
   async saveData(value) { this.savedData = value; }
   registerEvent(event) { this.registeredEvents.push(event); }
   registerView(type, factory) { this.viewType = type; this.viewFactory = factory; }
-  addRibbonIcon(icon, label, callback) { this.ribbon = { icon, label, callback }; }
+  addRibbonIcon(icon, label, callback) { this.ribbon = { icon, label, callback }; return new FakeElement('button', { attr: { 'aria-label': label, title: label } }); }
   addCommand(command) { this.commands ||= []; this.commands.push(command); if (!this.command) this.command = command; }
+  removeCommand(id) { this.commands = (this.commands || []).filter(command => command.id !== id); }
   addSettingTab(tab) { this.settingsTab = tab; }
 }
 
@@ -85,6 +87,15 @@ class FakeSetting {
   addButton(callback) {
     const component = { setButtonText(value) { this.text = value; return this; }, onClick(callback) { this.click = callback; return this; } };
     callback(component); this.buttonComponent = component; return this;
+  }
+  addDropdown(callback) {
+    const component = {
+      options: {},
+      addOption(value, label) { this.options[value] = label; return this; },
+      setValue(value) { this.value = value; return this; },
+      onChange(callback) { this.change = callback; return this; },
+    };
+    callback(component); this.dropdownComponent = component; return this;
   }
 }
 
@@ -251,17 +262,20 @@ test('CommonJS plugin entry registers native preview, command, settings, and a s
   assert.equal(plugin.viewType, main.VIEW_TYPE);
   assert.equal(plugin.ribbon.label, '打开博客预览');
   assert.equal(plugin.command.id, 'open-blog-preview');
-  assert.deepEqual(plugin.settings, { siteUrl: 'https://blog.example', username: 'writer', secretRef: 'saved-ref' });
-  assert.deepEqual(plugin.savedData, { siteUrl: 'https://blog.example', username: 'writer', secretRef: 'saved-ref' });
+  assert.deepEqual(plugin.settings, { siteUrl: 'https://blog.example', username: 'writer', secretRef: 'saved-ref', uiLanguage: 'zh-CN' });
+  assert.deepEqual(plugin.savedData, { siteUrl: 'https://blog.example', username: 'writer', secretRef: 'saved-ref', uiLanguage: 'zh-CN' });
   assert.equal(Object.hasOwn(plugin.settings, 'password'), false);
   const realAdapter = app.vault.adapter;
   app.vault.adapter = { getBasePath: () => 'C:/unsafe-fake-adapter' };
   assert.equal(plugin.getJournalStore(plugin.settings), null);
   app.vault.adapter = realAdapter;
   await plugin.updateSetting('username', 'writer-updated');
-  assert.deepEqual(plugin.savedData, { siteUrl: 'https://blog.example', username: 'writer-updated', secretRef: 'saved-ref' });
+  assert.deepEqual(plugin.savedData, { siteUrl: 'https://blog.example', username: 'writer-updated', secretRef: 'saved-ref', uiLanguage: 'zh-CN' });
 
   plugin.settingsTab.display();
+  const languageSetting = settingComponents.filter(setting => setting.name === '界面语言').at(-1);
+  assert.deepEqual(languageSetting.dropdownComponent.options, { 'zh-CN': '简体中文', en: 'English' });
+  assert.equal(languageSetting.dropdownComponent.value, 'zh-CN');
   assert.ok(settingComponents.some((setting) => setting.customComponent instanceof FakeSecretComponent));
   assert.equal(settingComponents.find((setting) => setting.customComponent instanceof FakeSecretComponent).customComponent.value, 'saved-ref');
 
@@ -275,6 +289,7 @@ test('CommonJS plugin entry registers native preview, command, settings, and a s
   assert.doesNotMatch(view.frame.srcdoc, /<script\b/i);
   assert.doesNotMatch(view.frame.srcdoc, /href="https:\/\/outside\.example"/);
   assert.equal(view.publishButton.disabled, false);
+  assert.equal(view.publishButton.textContent, '发布文章');
   assert.equal(view.checkButton.disabled, true);
   assert.equal(notices.length, 0);
 
@@ -458,6 +473,10 @@ test('local stylesheet persists, refreshes on modify/delete/rename and clears wi
   await plugin.styleRefresh;
   assert.doesNotMatch(view.frame.srcdoc, /article\{color:blue\}/);
   assert.match(view.feedbackEl.textContent, /CSS/);
+  const previewBeforeLocaleSwitch = plugin.lastPreview;
+  await plugin.updateLocale('en');
+  assert.equal(plugin.lastPreview, previewBeforeLocaleSwitch);
+  assert.match(view.feedbackEl.textContent, /Local CSS was not applied/i);
   const noticeCount = notices.length;
   await plugin.controller.refresh();
   await plugin.controller.refresh();
@@ -508,4 +527,186 @@ test('late stylesheet reads cannot restore cleared, replaced or unloaded CSS', a
   await unloading;
   assert.equal(plugin.customCss, '');
   assert.equal(plugin.refreshTimer, null);
+});
+
+test('legacy and invalid locale config falls back to Chinese and saves beside existing settings', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  plugin.loadData = async () => ({
+    siteUrl: 'https://blog.example', username: 'writer', secretRef: 'saved-ref', previewCssPath: 'styles/blog.css',
+    ...(plugin.invalidLocale === undefined ? {} : { uiLanguage: plugin.invalidLocale }),
+  });
+  plugin.invalidLocale = 'fr';
+  await plugin.onload();
+  await plugin.styleRefresh;
+  clearTimeout(plugin.refreshTimer);
+  plugin.refreshTimer = null;
+  assert.equal(plugin.settings.uiLanguage, 'zh-CN');
+  await plugin.updateLocale('en');
+  assert.deepEqual(plugin.savedData, {
+    siteUrl: 'https://blog.example', username: 'writer', secretRef: 'saved-ref',
+    previewCssPath: 'styles/blog.css', uiLanguage: 'en',
+  });
+  await plugin.updateSetting('username', 'writer-updated');
+  assert.deepEqual(plugin.savedData, {
+    siteUrl: 'https://blog.example', username: 'writer-updated', secretRef: 'saved-ref',
+    previewCssPath: 'styles/blog.css', uiLanguage: 'en',
+  });
+  await plugin.onunload();
+});
+
+test('English selector translates major plugin UI while preserving user values and preview gates', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  plugin.loadData = async () => ({
+    siteUrl: 'https://blog.example', username: 'writer <author>', secretRef: 'saved-ref', uiLanguage: 'en',
+  });
+  await plugin.onload();
+  await plugin.styleRefresh;
+  clearTimeout(plugin.refreshTimer);
+  plugin.refreshTimer = null;
+  plugin.settingsTab.display();
+  const language = settingComponents.filter(item => item.name === 'Interface language').at(-1);
+  assert.deepEqual(language.dropdownComponent.options, { 'zh-CN': '简体中文', en: 'English' });
+  assert.equal(language.dropdownComponent.value, 'en');
+  assert.equal(settingComponents.filter(item => item.name === 'Username').at(-1).textComponent.value, 'writer <author>');
+  assert.equal(settingComponents.filter(item => item.name === 'WordPress HTTPS site URL').at(-1).textComponent.value, 'https://blog.example');
+  assert.equal(settingComponents.filter(item => item.name === 'Connection test').at(-1).buttonComponent.text, 'Test connection');
+  assert.equal(plugin.command.id, 'open-blog-preview');
+  assert.deepEqual(plugin.commands.map(command => command.id), ['open-blog-preview', 'restore-published-association']);
+  assert.equal(plugin.command.name, 'Open blog preview');
+  const view = plugin.viewFactory({});
+  await view.onOpen();
+  const preview = {
+    html: '<article><h1>文章原题</h1></article>', siteUrl: 'https://blog.example',
+    publishedLink: 'https://blog.example/?p=27', dirty: true,
+    issues: [{ code: 'missing_image', message: '有图片未找到；请检查图片引用。' }], canPublish: false,
+  };
+  plugin.lastPreview = preview;
+  view.update(preview);
+  assert.equal(view.publishButton.textContent, 'Update article');
+  assert.equal(view.publishButton.disabled, true);
+  assert.equal(view.infoEl.children[0].textContent, 'View article');
+  assert.equal(view.infoEl.children[0].attributes.href, 'https://blog.example/?p=27');
+  assert.match(view.infoEl.children.map(child => child.textContent).join(' '), /Unpublished changes/);
+  assert.match(view.feedbackEl.textContent, /image/i);
+  assert.match(view.frame.srcdoc, /文章原题/);
+  const noticesBefore = notices.length;
+  await plugin.runAction('publish');
+  assert.equal(notices.at(-1), 'Wait for the preview or resolve its warnings first.');
+  assert.equal(notices.length, noticesBefore + 1);
+  plugin.lastPreview = { ...preview, canPublish: true };
+  plugin.controller.publish = async () => ({ status: 'needs-check', reason: 'create-write-uncertain' });
+  await plugin.runAction('publish');
+  assert.match(notices.at(-1), /creation is uncertain/i);
+  assert.doesNotMatch(notices.at(-1), /create-write-uncertain/);
+  plugin.lastPreview = preview;
+  await plugin.updateLocale('zh-CN');
+  assert.equal(plugin.lastPreview, preview);
+  assert.equal(view.publishButton.disabled, true);
+  assert.equal(view.checkButton.hidden, true);
+  assert.equal(view.publishButton.textContent, '更新文章');
+  const pendingPreview = { ...preview, publishedLink: '', canPublish: true, needsCheck: true, manualRequired: false };
+  plugin.lastPreview = pendingPreview;
+  view.update(pendingPreview);
+  view.setBusy(true);
+  await plugin.updateLocale('en');
+  assert.equal(view.checkButton.hidden, false);
+  assert.equal(view.checkButton.disabled, true);
+  assert.equal(view.publishButton.disabled, true);
+  assert.equal(view.restoreButton.disabled, true);
+  await view.onClose();
+  await plugin.onunload();
+  notices.length = 0;
+});
+
+test('locale-only change serializes saves and redraws without touching controller intent or preview', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+  await plugin.styleRefresh;
+  clearTimeout(plugin.refreshTimer);
+  plugin.refreshTimer = null;
+  const preview = { html: '<p>unchanged</p>', canPublish: true };
+  plugin.lastPreview = preview;
+  const redrawn = [];
+  plugin.currentView = { update(value) { redrawn.push(value); } };
+  const modal = { renderCount: 0, render() { this.renderCount += 1; } };
+  plugin.restoreModal = modal;
+  const calls = [];
+  for (const name of ['setSettings', 'invalidate', 'refresh', 'testConnection', 'publish', 'checkStatus', 'restoreAssociation']) {
+    const original = plugin.controller[name].bind(plugin.controller);
+    plugin.controller[name] = (...args) => { calls.push(name); return original(...args); };
+  }
+  let releaseFirstSave;
+  let markFirstSaveStarted;
+  const firstSaveStarted = new Promise(resolve => { markFirstSaveStarted = resolve; });
+  const firstSaveGate = new Promise(resolve => { releaseFirstSave = resolve; });
+  const snapshots = [];
+  plugin.saveData = async value => {
+    snapshots.push({ ...value });
+    if (snapshots.length === 1) { markFirstSaveStarted(); await firstSaveGate; }
+  };
+  const settingsSave = plugin.updateSetting('username', 'writer-next');
+  plugin.lastPreview = preview;
+  redrawn.length = 0;
+  const localeSave = plugin.updateLocale('en');
+  await firstSaveStarted;
+  assert.equal(snapshots.length, 1);
+  assert.equal('uiLanguage' in snapshots[0], true);
+  releaseFirstSave();
+  await Promise.all([settingsSave, localeSave]);
+  assert.equal(plugin.lastPreview, preview);
+  assert.deepEqual(redrawn, [preview]);
+  assert.equal(modal.renderCount, 1);
+  assert.deepEqual(calls, ['setSettings']);
+  assert.deepEqual(plugin.commands.map(command => [command.id, command.name]), [
+    ['open-blog-preview', 'Open blog preview'],
+    ['restore-published-association', 'Restore published article association'],
+  ]);
+  assert.equal(plugin.ribbonButtonEl.attributes.title, 'Open blog preview');
+  assert.equal(snapshots.length, 2);
+  assert.equal(snapshots.at(-1).siteUrl, 'https://blog.example');
+  assert.equal(snapshots.at(-1).username, 'writer-next');
+  assert.equal(snapshots.at(-1).secretRef, 'saved-ref');
+  assert.equal(snapshots.at(-1).uiLanguage, 'en');
+  clearTimeout(plugin.refreshTimer);
+  plugin.refreshTimer = null;
+  calls.length = 0;
+  redrawn.length = 0;
+  await plugin.updateLocale('zh-CN');
+  assert.equal(plugin.lastPreview, preview);
+  assert.deepEqual(redrawn, [preview]);
+  assert.deepEqual(calls, []);
+  assert.equal(snapshots.at(-1).siteUrl, 'https://blog.example');
+  assert.equal(snapshots.at(-1).username, 'writer-next');
+  assert.equal(snapshots.at(-1).secretRef, 'saved-ref');
+  assert.equal(snapshots.at(-1).uiLanguage, 'zh-CN');
+  await plugin.onunload();
+});
+
+test('locale redraw preserves the recovery modal target, typed path, and confirmation guard', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app, note, listeners } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+  plugin.openRestoreModal();
+  const modal = FakeModal.last;
+  const target = modal.target;
+  modal.oldPath = 'Drafts/former.md';
+  await plugin.updateLocale('en');
+  assert.equal(modal.target, target);
+  const modalSettings = settingComponents.filter(item => item.container === modal.contentEl);
+  assert.equal(modalSettings.at(-2).textComponent.value, 'Drafts/former.md');
+  assert.equal(modalSettings.at(-1).buttonComponent.text, 'Confirm restore association');
+  app.workspace.getActiveFile = () => new FakeTFile('Drafts/other.md');
+  listeners.workspace['active-leaf-change']();
+  await modalSettings.at(-1).buttonComponent.click();
+  assert.equal(modal.closed, undefined);
+  assert.match(notices.at(-1), /active note or settings changed/i);
+  await plugin.onunload();
+  notices.length = 0;
 });

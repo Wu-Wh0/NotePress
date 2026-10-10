@@ -267,3 +267,13 @@ test('preview generations revoke prior blob URLs and unload revokes the remainin
   f.controller.dispose();
   assert.deepEqual(f.counters.revoked, ['blob:synthetic/1', 'blob:synthetic/2']);
 });
+
+test('UI locale is excluded from the frozen publication input identity', async () => {
+  let frozenPlan;
+  const f = fixture({ publisherHooks: { publish: async plan => { frozenPlan = plan; return { status: 'blocked' }; } } });
+  await f.controller.publish();
+  f.state.settings = { ...f.state.settings, uiLanguage: 'en' };
+  assert.equal(await frozenPlan.isCurrent(), true);
+  assert.equal(f.counters.publish, 1);
+  f.controller.dispose();
+});
