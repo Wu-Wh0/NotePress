@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const constants = require('node:fs').constants;
 const path = require('node:path');
 
-const SCHEMA = 1;
+const ANCHOR = /^obsidian-create-[a-f0-9]{32}$/u;
 const MAX_RECORD_BYTES = 256 * 1024;
 const MAX_MEDIA_ITEMS = 256;
 const HASH = /^[a-f0-9]{64}$/u;
@@ -19,7 +19,8 @@ const BASE_FIELDS = [
 ];
 const OPTIONAL_FIELDS = [
   'postID', 'link', 'remoteHash', 'expectedBodyHash',
-  'inFlightAssetHash', 'previousReceipt', 'draftRemoteHash',
+  'inFlightAssetHash', 'previousReceipt', 'draftRemoteHash', 'createAnchor',
+  'createAmbiguous', 'createLookupPending',
 ];
 const MEDIA_FIELDS = ['referenceHash', 'assetHash', 'id', 'url'];
 const BASE_SET = new Set(BASE_FIELDS);
@@ -94,7 +95,8 @@ function validMedia(media, origin) {
 
 function validRecord(record, expectedNoteID, site, allowPreviousReceipt = true) {
   if (!hasExactFields(record, BASE_FIELDS, OPTIONAL_FIELDS)) return false;
-  if (record.schema !== SCHEMA || record.noteID !== expectedNoteID || record.siteUrl !== site.value
+  if (![1, 2].includes(record.schema) || (record.schema === 2 ? !ANCHOR.test(record.createAnchor) : Object.hasOwn(record, 'createAnchor'))
+      || record.noteID !== expectedNoteID || record.siteUrl !== site.value
       || !validNoteID(record.noteID) || !Number.isSafeInteger(record.ownerID) || record.ownerID < 1
       || !HASH.test(record.planHash) || !HASH.test(record.sourceHash) || !HASH.test(record.titleHash)
       || !STAGES.has(record.stage) || !validMedia(record.media, site.origin)) return false;
@@ -104,6 +106,11 @@ function validRecord(record, expectedNoteID, site, allowPreviousReceipt = true) 
   if (record.stage === 'creating') {
     if (hasPostID || record.media.length !== 0) return false;
   } else if (!hasPostID) return false;
+  if (Object.hasOwn(record, 'createAmbiguous')
+      && (record.schema !== 2 || record.stage !== 'creating' || record.createAmbiguous !== true)) return false;
+  if (Object.hasOwn(record, 'createLookupPending')
+      && (record.schema !== 2 || record.stage !== 'creating' || record.createLookupPending !== true)) return false;
+  if (record.createAmbiguous === true && record.createLookupPending === true) return false;
 
   const hasLink = Object.hasOwn(record, 'link');
   const hasRemoteHash = Object.hasOwn(record, 'remoteHash');
@@ -134,6 +141,8 @@ function validRecord(record, expectedNoteID, site, allowPreviousReceipt = true) 
         || record.previousReceipt.siteUrl !== record.siteUrl
         || record.previousReceipt.ownerID !== record.ownerID
         || record.previousReceipt.postID !== record.postID
+        || record.previousReceipt.schema !== record.schema
+        || record.previousReceipt.createAnchor !== record.createAnchor
         || !validRecord(record.previousReceipt, expectedNoteID, site, false)) return false;
   }
   if (record.stage === 'completed' && hasPrevious) return false;

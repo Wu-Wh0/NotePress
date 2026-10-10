@@ -80,6 +80,52 @@ test('strict schema, site/note binding, bounded records, and corruption fail clo
   await assert.rejects(store.load(good.noteID));
 });
 
+test('schema 2 requires a strict anchor and schema 1 rejects anchor pollution', async (t) => {
+  const directory = path.join(await sandbox(t), 'plugin-data');
+  const store = createJournalStore({ directory, siteUrl: SITE });
+  const anchor = `obsidian-create-${'b'.repeat(32)}`;
+  const v2 = record('anchor-note', { schema: 2, createAnchor: anchor });
+  await store.save(v2.noteID, v2);
+  assert.deepEqual(await store.load(v2.noteID), v2);
+  const completed = { ...v2, stage: 'completed', postID: 1, link: `${SITE}/post/1`, remoteHash: HASH };
+  await store.save(v2.noteID, completed);
+  const updating = { ...completed, stage: 'updating-post', previousReceipt: completed };
+  await store.save(v2.noteID, updating);
+  await assert.rejects(store.save(v2.noteID, { ...updating,
+    previousReceipt: { ...completed, createAnchor: `obsidian-create-${'c'.repeat(32)}` } }));
+  await assert.rejects(store.save(v2.noteID, { ...updating,
+    previousReceipt: { ...completed, schema: 1, createAnchor: undefined } }));
+  for (const bad of [record('anchor-note', { schema: 2 }), record('anchor-note', { createAnchor: anchor }),
+    record('anchor-note', { schema: 2, createAnchor: `${anchor}x` }),
+    record('anchor-note', { schema: 2, createAnchor: anchor.toUpperCase() })]) {
+    await assert.rejects(store.save('anchor-note', bad));
+  }
+  assert.deepEqual(await store.load(v2.noteID), updating);
+});
+
+test('create lookup guard and ambiguity latch are strict, mutually exclusive, and survive cold disk recovery', async (t) => {
+  const directory = path.join(await sandbox(t), 'plugin-data');
+  const store = createJournalStore({ directory, siteUrl: SITE });
+  const anchor = `obsidian-create-${'d'.repeat(32)}`;
+  const pending = record('ambiguous-note', { schema: 2, createAnchor: anchor });
+  for (const field of ['createAmbiguous', 'createLookupPending']) for (const value of [false, 'true', 1, [], {}])
+    await assert.rejects(store.save('ambiguous-note', { ...pending, [field]: value }));
+  for (const bad of [
+    { ...pending, schema: 1, createAmbiguous: true },
+    { ...pending, stage: 'draft-created', postID: 1, createAmbiguous: true },
+    { ...pending, postID: 1, createAmbiguous: true },
+    { ...pending, schema: 1, createLookupPending: true },
+    { ...pending, stage: 'draft-created', postID: 1, createLookupPending: true },
+    { ...pending, createAmbiguous: true, createLookupPending: true },
+  ]) await assert.rejects(store.save('ambiguous-note', bad));
+  await store.save(pending.noteID, { ...pending, createAmbiguous: true });
+  assert.deepEqual(await createJournalStore({ directory, siteUrl: SITE }).load(pending.noteID),
+    { ...pending, createAmbiguous: true });
+  const guarded = { ...pending, createLookupPending: true };
+  await store.save(pending.noteID, guarded);
+  assert.deepEqual(await createJournalStore({ directory, siteUrl: SITE }).load(pending.noteID), guarded);
+});
+
 test('rename failure leaves the last confirmed receipt intact on disk', async (t) => {
   const directory = path.join(await sandbox(t), 'plugin-data');
   const store = createJournalStore({ directory, siteUrl: SITE });
@@ -147,7 +193,7 @@ function clientFixture({ uncertainCreate = false } = {}) {
       counts.create += 1;
       const id = nextID++;
       posts.set(id, {
-        id, author: 17, status: fields.status,
+        id, type: 'post', author: 17, status: fields.status, slug: fields.slug,
         title: { raw: fields.title }, content: { raw: fields.content },
         link: `${SITE}/posts/${id}`,
       });
@@ -161,6 +207,8 @@ function clientFixture({ uncertainCreate = false } = {}) {
       if (Object.hasOwn(fields, 'title')) post.title = { raw: fields.title };
       if (Object.hasOwn(fields, 'content')) post.content = { raw: fields.content };
       if (Object.hasOwn(fields, 'status')) post.status = fields.status;
+      if (Object.hasOwn(fields, 'slug')) post.slug = fields.slug;
+      if (fields.status === 'publish' && post.slug === '') post.slug = 'safe-title';
       return { id };
     },
     async getPost(id) { return structuredClone(posts.get(id)); },
@@ -209,6 +257,131 @@ test('publisher cold-recovers a disk receipt and updates the same remote ID', as
   assert.equal(afterRestart.postID, first.postID);
   assert.equal(remote.counts.create, 1);
   assert.equal(remote.counts.update, 3);
+});
+
+test('disk cold start claims one lost-ACK create by its persisted anchor and resumes only on click', async (t) => {
+  const { createPublisher } = require('../src/publisher');
+  const directory = path.join(await sandbox(t), 'plugin-data');
+  const remote = clientFixture({ uncertainCreate: true });
+  let lookups = 0;
+  let showResults = false;
+  remote.client.findPosts = async criteria => {
+    lookups += 1;
+    assert.deepEqual(criteria, { slug: anchor, status: 'any', page: 1, perPage: 2 });
+    return showResults ? [...remote.posts.values()].filter(post => post.slug === criteria.slug) : [];
+  };
+  const make = () => createPublisher({ client: remote.client,
+    store: createJournalStore({ directory, siteUrl: SITE }), siteUrl: SITE });
+  const source = { noteID: 'cold-anchor', title: 'Safe title', source: 'Safe body', images: [] };
+  assert.equal((await make().publish(source)).status, 'needs-check');
+  const store = createJournalStore({ directory, siteUrl: SITE });
+  const anchor = (await store.load(source.noteID)).createAnchor;
+  assert.match(anchor, /^obsidian-create-[a-f0-9]{32}$/u);
+  assert.equal((await make().checkStatus(source.noteID, source)).status, 'needs-check');
+  showResults = true;
+  const checked = await make().checkStatus(source.noteID, source);
+  assert.deepEqual(checked, { status: 'draft', postID: 1, canResume: true });
+  assert.equal(lookups, 2);
+  assert.equal(remote.counts.create, 1);
+  assert.equal(remote.counts.update, 0);
+  assert.equal((await store.load(source.noteID)).createAnchor, anchor);
+  assert.equal((await make().publish(source)).status, 'published');
+  assert.equal(remote.counts.create, 1);
+  assert.equal((await store.load(source.noteID)).createAnchor, anchor);
+});
+
+test('ambiguous create candidates latch across cold publishers and never bind the surviving draft', async (t) => {
+  const { createPublisher } = require('../src/publisher');
+  const directory = path.join(await sandbox(t), 'plugin-data');
+  const remote = clientFixture({ uncertainCreate: true });
+  let lookupMode = 'zero';
+  let lookups = 0;
+  let reads = 0;
+  remote.client.findPosts = async criteria => {
+    lookups += 1;
+    return [...remote.posts.values()].filter(post => lookupMode === 'ambiguous' || post.slug === criteria.slug);
+  };
+  const getPost = remote.client.getPost;
+  remote.client.getPost = async id => { reads += 1; return getPost(id); };
+  const make = () => createPublisher({ client: remote.client,
+    store: createJournalStore({ directory, siteUrl: SITE }), siteUrl: SITE });
+  const source = { noteID: 'ambiguous-cold-note', title: 'Safe title', source: 'Safe body', images: [] };
+  assert.equal((await make().publish(source)).status, 'needs-check');
+  const anchor = (await createJournalStore({ directory, siteUrl: SITE }).load(source.noteID)).createAnchor;
+  const original = [...remote.posts.values()][0];
+  remote.posts.set(2, { ...structuredClone(original), id: 2, link: `${SITE}/posts/2` });
+  remote.counts.create = 1;
+  lookupMode = 'ambiguous';
+  let writes = { ...remote.counts };
+  const first = await make().checkStatus(source.noteID, source);
+  assert.equal(first.status, 'needs-check');
+  assert.equal(first.manualRequired, true);
+  assert.equal(first.reason, 'create-lookup-ambiguous');
+  assert.equal(remote.counts.create, writes.create);
+  assert.equal(remote.counts.update, writes.update);
+  assert.equal((await createJournalStore({ directory, siteUrl: SITE }).load(source.noteID)).createAmbiguous, true);
+  remote.posts.delete(2);
+  lookupMode = 'one';
+  const cold = make();
+  const remoteReads = { lookups, reads };
+  const check = await cold.checkStatus(source.noteID, source);
+  assert.equal(check.manualRequired, true);
+  assert.equal(check.postID, undefined);
+  assert.deepEqual({ lookups, reads }, remoteReads);
+  writes = { ...remote.counts };
+  const resumed = await make().publish(source);
+  assert.equal(resumed.status, 'needs-check');
+  assert.equal(resumed.manualRequired, true);
+  assert.deepEqual({ lookups, reads }, remoteReads);
+  assert.equal(remote.counts.create, writes.create);
+  assert.equal(remote.counts.update, writes.update);
+  assert.equal(anchor, (await createJournalStore({ directory, siteUrl: SITE }).load(source.noteID)).createAnchor);
+});
+
+test('failed ambiguity save leaves a real disk lookup guard that blocks cold recognition of the survivor', async (t) => {
+  const { createPublisher } = require('../src/publisher');
+  const directory = path.join(await sandbox(t), 'plugin-data');
+  const remote = clientFixture({ uncertainCreate: true });
+  let lookups = 0;
+  let mode = 'one';
+  remote.client.findPosts = async criteria => {
+    lookups += 1;
+    return [...remote.posts.values()].filter(post => mode === 'ambiguous' || post.slug === criteria.slug);
+  };
+  const baseStore = createJournalStore({ directory, siteUrl: SITE });
+  let saves = 0;
+  let failAmbiguity = true;
+  const store = {
+    load: (...args) => baseStore.load(...args),
+    async save(...args) {
+      saves += 1;
+      if (saves === 3 && failAmbiguity) { failAmbiguity = false; throw new Error('one-shot disk failure'); }
+      return baseStore.save(...args);
+    },
+  };
+  const make = () => createPublisher({ client: remote.client, store, siteUrl: SITE });
+  const source = { noteID: 'ambiguous-save-disk', title: 'Safe title', source: 'Safe body', images: [] };
+  assert.equal((await make().publish(source)).status, 'needs-check');
+  const anchor = (await baseStore.load(source.noteID)).createAnchor;
+  const originalID = [...remote.posts.keys()][0];
+  const original = structuredClone(remote.posts.get(originalID));
+  remote.posts.set(originalID + 1, { ...original, id: originalID + 1, link: `${SITE}/posts/${originalID + 1}` });
+  mode = 'ambiguous';
+  const failed = await make().checkStatus(source.noteID, source);
+  assert.equal(failed.reason, 'journal-unavailable');
+  assert.equal(lookups, 1);
+  const durable = await baseStore.load(source.noteID);
+  assert.equal(durable.createLookupPending, true);
+  assert.equal(durable.createAmbiguous, undefined);
+  remote.posts.delete(originalID);
+  mode = 'one';
+  const before = lookups;
+  const cold = await make().checkStatus(source.noteID, source);
+  assert.equal(cold.manualRequired, true);
+  assert.equal(cold.reason, 'create-lookup-incomplete');
+  assert.equal(cold.postID, undefined);
+  assert.equal(lookups, before);
+  assert.equal((await baseStore.load(source.noteID)).createAnchor, anchor);
 });
 
 test('cold publisher keeps uncertain create pending and never resends create', async (t) => {

@@ -284,7 +284,8 @@ function createHostController(deps = {}) {
         receipt: completed ? { link, dirty, needsCheck: false } : {
           link: null, dirty: false, needsCheck: record.stage !== 'completed'
             && !(['draft-created', 'updating-draft'].includes(record.stage) && /^[a-f0-9]{64}$/u.test(record.draftRemoteHash || '')),
-          manualRequired: ['creating', 'uploading-media'].includes(record.stage),
+          manualRequired: record.stage === 'uploading-media' || (record.stage === 'creating'
+            && !(record.schema === 2 && /^obsidian-create-[a-f0-9]{32}$/u.test(record.createAnchor))),
         },
         store,
       };

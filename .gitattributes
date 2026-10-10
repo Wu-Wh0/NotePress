@@ -1,6 +1,7 @@
 * text=auto
 /src/** text eol=lf
 /test/** text eol=lf
+/test/fixtures/*.png -text
 /*.json text eol=lf
 /build.mjs text eol=lf
 /styles.css text eol=lf

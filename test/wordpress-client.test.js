@@ -117,6 +117,30 @@ test('createPost defaults to a native draft and sends UTF-8 JSON once', async (t
   assert.deepEqual(JSON.parse(requests[0].body), { title: '你好', content: '正文', status: 'draft' });
 });
 
+test('create and update serialize only an explicit validated slug', async (t) => {
+  const requests = [];
+  const fixture = await startServer((req, res) => {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      requests.push({ route: routeOf(req), body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
+      sendJson(res, 200, { id: 41 });
+    });
+  });
+  t.after(() => closeServer(fixture.server));
+  const client = createWordPressClient(baseClientOptions(fixture.siteUrl, fixture.clientOptions));
+  await client.createPost({ title: 'Title', content: '', status: 'draft', slug: `obsidian-create-${'a'.repeat(32)}` });
+  await client.updatePost(41, { title: 'Title', content: 'Body', status: 'draft', slug: '' });
+  assert.deepEqual(requests, [
+    { route: '/wp/v2/posts', body: { title: 'Title', content: '', status: 'draft', slug: `obsidian-create-${'a'.repeat(32)}` } },
+    { route: '/wp/v2/posts/41', body: { title: 'Title', content: 'Body', status: 'draft', slug: '' } },
+  ]);
+  for (const slug of [42, '', 'a'.repeat(201), 'bad\nslug']) {
+    await assert.rejects(client.createPost({ title: 'Title', content: '', slug }));
+  }
+  assert.equal(requests.length, 2);
+});
+
 test('uploadMedia sends the exact binary Buffer with a validated content-hash filename', async (t) => {
   const crypto = require('node:crypto');
   const binary = Buffer.from([0, 255, 1, 128, 10, 13]);
