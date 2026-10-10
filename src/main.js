@@ -8,7 +8,7 @@ const { createWordPressClient } = require('./wordpress-client');
 const { createPublisher } = require('./publisher');
 const { readPreviewCss, safeCustomCss } = require('./preview-css');
 
-const { Plugin, ItemView, PluginSettingTab, Setting, SecretComponent, MarkdownView, TFile, FileSystemAdapter, Notice } = obsidian;
+const { Plugin, ItemView, PluginSettingTab, Setting, SecretComponent, MarkdownView, TFile, FileSystemAdapter, Notice, Modal } = obsidian;
 const VIEW_TYPE = 'native-wordpress-preview';
 const CONTENT_SECURITY_POLICY = "default-src 'none'; img-src blob: data:; font-src data:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';";
 const BASE_CSS = 'html,body{margin:0;padding:0;background:var(--background-primary,#17191d);color:var(--text-normal,#e5e7eb);font-family:var(--font-text,system-ui,sans-serif)}body{padding:1.25rem;line-height:1.65}article{max-width:48rem;min-width:0;margin:0 auto;overflow-wrap:anywhere}img{max-width:100%;height:auto}article pre{max-width:100%;box-sizing:border-box;overflow-x:auto;white-space:pre;overflow-wrap:normal}article table{display:block;max-width:100%;overflow-x:auto}.math-scroll{max-width:100%;overflow-x:auto}.wiki-link-text{color:var(--text-accent,#93b4f4)}';
@@ -121,11 +121,13 @@ class BlogPreviewView extends ItemView {
     const actions = toolbar.createDiv({ cls: 'native-wordpress-actions' });
     this.publishButton = actions.createEl('button', { text: '发布文章', attr: { type: 'button' } });
     this.checkButton = actions.createEl('button', { text: '核对结果', attr: { type: 'button' } });
+    this.restoreButton = actions.createEl('button', { text: '恢复关联', attr: { type: 'button' } });
     this.feedbackEl = root.createDiv({ cls: 'native-wordpress-feedback', attr: { 'aria-live': 'polite' } });
     this.frame = root.createEl('iframe', { cls: 'native-wordpress-frame', attr: { title: '博客样式预览', sandbox: '' } });
     this.frame.setAttribute('sandbox', '');
     this.publishButton.addEventListener('click', () => { void this.plugin.runAction('publish'); });
     this.checkButton.addEventListener('click', () => { void this.plugin.runAction('checkStatus'); });
+    this.restoreButton.addEventListener('click', () => { this.plugin.openRestoreModal(); });
     this.plugin.attachView(this);
     this.update(this.plugin.lastPreview);
     this.plugin.scheduleRefresh();
@@ -160,6 +162,8 @@ class BlogPreviewView extends ItemView {
     this.publishButton.disabled = this.busy || !preview?.canPublish || preview?.needsCheck === true;
     this.checkButton.disabled = this.busy || preview?.needsCheck !== true || preview?.manualRequired === true;
     this.checkButton.hidden = preview?.needsCheck !== true || preview?.manualRequired === true;
+    this.restoreButton.disabled = this.busy;
+    this.restoreButton.hidden = preview?.canRestore !== true;
     if (this.frame && preview) this.frame.srcdoc = buildFrameDocument(preview.html, localKatexCss(), this.plugin.previewImages, this.plugin.customCss);
   }
 
@@ -170,6 +174,32 @@ class BlogPreviewView extends ItemView {
 
   showAction(message) {
     if (this.feedbackEl && message) this.feedbackEl.setText(message);
+  }
+}
+
+class RestoreAssociationModal extends Modal {
+  constructor(plugin, oldPath) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.oldPath = oldPath;
+  }
+
+  onOpen() {
+    this.target = this.plugin.controller.captureAssociationTarget();
+    this.contentEl.empty();
+    this.contentEl.createEl('h2', { text: '恢复已发布文章关联' });
+    this.contentEl.createEl('p', { text: '确认原路径后只恢复本地关联；更新文章仍需另行点击。' });
+    new Setting(this.contentEl).setName('原笔记路径（Vault 内）')
+      .addText(text => text.setPlaceholder('文件夹/原笔记.md').setValue(this.oldPath)
+        .onChange(value => { this.oldPath = value; }));
+    new Setting(this.contentEl).addButton(button => button.setButtonText('确认恢复关联').onClick(async () => {
+      try {
+        const result = await this.plugin.controller.restoreAssociation(this.oldPath, this.target);
+        new Notice(result.message || '无法确认原文章关联；未发布。', 5000);
+        if (result.status === 'restored') this.close();
+      } catch { new Notice('恢复关联失败；未发布。', 5000); }
+      finally { this.plugin.scheduleRefresh(); }
+    }));
   }
 }
 
@@ -272,6 +302,7 @@ class NativeWordPressPlugin extends Plugin {
       createClient: (options) => createWordPressClient(options),
       createPublisher: (options) => createPublisher(options),
       getStore: (settings) => this.getJournalStore(settings),
+      pathExists: (oldPath) => !!this.app.vault.getAbstractFileByPath(oldPath),
       onPreview: (preview) => {
         this.lastPreview = preview;
         this.currentView?.update(preview);
@@ -289,6 +320,7 @@ class NativeWordPressPlugin extends Plugin {
     this.registerView(VIEW_TYPE, (leaf) => new BlogPreviewView(leaf, this));
     this.addRibbonIcon('file-text', '打开博客预览', () => { void this.openPreview(); });
     this.addCommand({ id: 'open-blog-preview', name: '打开博客预览', callback: () => { void this.openPreview(); } });
+    this.addCommand({ id: 'restore-published-association', name: '恢复已发布文章关联', callback: () => this.openRestoreModal() });
     this.addSettingTab(new BlogSettingsTab(this.app, this));
     this.registerEvent(this.app.workspace.on('active-leaf-change', () => {
       this.controller.invalidate('active-leaf-change');
@@ -307,6 +339,9 @@ class NativeWordPressPlugin extends Plugin {
       if ([oldPath, file?.path].includes(this.settings.previewCssPath)) this.refreshStyle();
       const changed = this.controller.invalidate('vault-rename', oldPath) || this.controller.invalidate('vault-rename', file?.path);
       if (changed) this.scheduleRefresh();
+      void this.controller.noteRenamed(file, oldPath)
+        .then(associated => { if (associated) this.scheduleRefresh(); })
+        .catch(() => { new Notice('关联检查失败；请先恢复关联。', 5000); this.scheduleRefresh(); });
     }));
     this.refreshStyle();
   }
@@ -332,10 +367,23 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   async openPreview() {
-    const leaf = this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
-    await leaf.setViewState({ type: VIEW_TYPE, active: true });
-    this.app.workspace.revealLeaf(leaf);
-    this.scheduleRefresh();
+    if (this.previewOpening) return this.previewOpening;
+    this.previewOpening = (async () => {
+      const existingLeaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+      const leaf = existingLeaf || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
+      await leaf.setViewState({ type: VIEW_TYPE, active: true });
+      this.app.workspace.revealLeaf(leaf);
+      this.scheduleRefresh();
+    })();
+    try {
+      await this.previewOpening;
+    } finally {
+      this.previewOpening = null;
+    }
+  }
+
+  openRestoreModal() {
+    new RestoreAssociationModal(this, this.controller.proposedOldPath()).open();
   }
 
   attachView(view) {

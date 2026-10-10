@@ -250,18 +250,20 @@ function createWordPressClient(options) {
     },
     async createPost(post) {
       if (!post || typeof post !== 'object' || Array.isArray(post)) throw fail('post must be an object', { code: 'INVALID_ARGUMENT' });
-      if (Object.keys(post).some((key) => !['title', 'content', 'status'].includes(key))) throw fail('post fields are invalid', { code: 'INVALID_ARGUMENT' });
+      if (Object.keys(post).some((key) => !['title', 'content', 'status', 'slug'].includes(key))) throw fail('post fields are invalid', { code: 'INVALID_ARGUMENT' });
       if (typeof post.title !== 'string' || typeof post.content !== 'string') throw fail('post title and content must be strings', { code: 'INVALID_ARGUMENT' });
+      if (Object.hasOwn(post, 'slug') && (typeof post.slug !== 'string' || post.slug.length < 1
+          || post.slug.length > 200 || /[\u0000-\u001f\u007f]/u.test(post.slug))) throw fail('post slug is invalid', { code: 'INVALID_ARGUMENT' });
       const status = post.status === undefined ? 'draft' : post.status;
       if (status !== 'draft' && status !== 'publish') throw fail('post status must be draft or publish', { code: 'INVALID_ARGUMENT' });
-      const created = await requestJson({ route: '/wp/v2/posts', method: 'POST', jsonBody: { title: post.title, content: post.content, status } });
+      const created = await requestJson({ route: '/wp/v2/posts', method: 'POST', jsonBody: { title: post.title, content: post.content, status, ...(Object.hasOwn(post, 'slug') ? { slug: post.slug } : {}) } });
       if (!Number.isSafeInteger(created?.id) || created.id < 1) throw fail('WordPress write acknowledgement is invalid', { code: 'INVALID_ACKNOWLEDGEMENT', dispatched: true, indeterminate: true });
       return created;
     },
     async updatePost(id, fields) {
       if (!Number.isSafeInteger(id) || id < 1) throw fail('post id must be a positive integer', { code: 'INVALID_ARGUMENT' });
       if (!fields || typeof fields !== 'object' || Array.isArray(fields)) throw fail('post fields must be an object', { code: 'INVALID_ARGUMENT' });
-      const allowed = new Set(['title', 'content', 'status']);
+      const allowed = new Set(['title', 'content', 'status', 'slug']);
       const keys = Object.keys(fields);
       if (!keys.length || keys.some((key) => !allowed.has(key))) throw fail('post update fields are invalid', { code: 'INVALID_ARGUMENT' });
       const body = {};
@@ -276,6 +278,11 @@ function createWordPressClient(options) {
       if (Object.hasOwn(fields, 'status')) {
         if (fields.status !== 'draft' && fields.status !== 'publish') throw fail('post status must be draft or publish', { code: 'INVALID_ARGUMENT' });
         body.status = fields.status;
+      }
+      if (Object.hasOwn(fields, 'slug')) {
+        if (typeof fields.slug !== 'string' || fields.slug.length > 200
+            || /[\u0000-\u001f\u007f]/u.test(fields.slug)) throw fail('post slug is invalid', { code: 'INVALID_ARGUMENT' });
+        body.slug = fields.slug;
       }
       const updated = await requestJson({ route: `/wp/v2/posts/${id}`, method: 'POST', jsonBody: body });
       if (!Number.isSafeInteger(updated?.id) || updated.id !== id) throw fail('WordPress write acknowledgement is invalid', { code: 'INVALID_ACKNOWLEDGEMENT', dispatched: true, indeterminate: true });

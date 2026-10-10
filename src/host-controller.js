@@ -116,6 +116,7 @@ function issueMessage(code) {
     secret_missing: '请在设置中选择 WordPress 密钥。',
     settings_missing: '请先完成 WordPress 连接设置。',
     store_unavailable: '发布记录不可用，未发送请求。',
+    association_pending: '请先确认已发布文章关联；当前不会新建文章。',
     busy: '上一个操作仍在处理中。',
     connection_failed: '连接失败，请检查设置。',
     publish_failed: '未能完成发布，请检查文章和连接设置。',
@@ -155,6 +156,7 @@ function createHostController(deps = {}) {
   let currentImagePaths = new Set();
   let activeObjectUrls = new Set();
   let connectionControllers = new Set();
+  let proposal = null;
 
   function currentSettings() {
     return sanitizeSettings(deps.getSettings());
@@ -183,13 +185,42 @@ function createHostController(deps = {}) {
   }
 
   function setSettings() {
+    proposal = null;
     return invalidate('settings-changed');
+  }
+
+  async function noteRenamed(file, oldPath) {
+    const selected = deps.getSelectedFile();
+    if (!deps.isFile(file) || file !== selected || String(file.extension).toLowerCase() !== 'md'
+        || typeof oldPath !== 'string' || !oldPath || oldPath === file.path) return false;
+    const origin = proposal?.file === file && proposal.newPath === oldPath ? proposal.oldPath : oldPath;
+    invalidate('vault-rename');
+    const candidate = { oldPath: origin, newPath: file.path, file, state: 'checking' };
+    proposal = candidate;
+    try {
+      const settings = currentSettings();
+      const key = settingsKey(settings);
+      const startRevision = revision;
+      const store = deps.getStore(settings);
+      const oldHash = sha256(Buffer.from(origin, 'utf8'));
+      const oldID = await store.resolve(oldHash);
+      const record = oldID.noteID && await store.load(oldID.noteID);
+      if (proposal !== candidate) return true;
+      if (!isSelected(file, candidate.newPath, startRevision, key)) return true;
+      if (!record) { proposal = null; return true; }
+      await store.reserve(oldHash, sha256(Buffer.from(candidate.newPath, 'utf8')), oldID.noteID,
+        () => isSelected(file, candidate.newPath, startRevision, key) && proposal === candidate);
+      if (proposal === candidate) candidate.state = record.stage === 'completed' ? 'ready' : 'blocked';
+    } catch {
+      if (proposal === candidate) candidate.state = 'blocked';
+    }
+    return true;
   }
 
   function isSelected(file, path, startRevision, key) {
     if (disposed || revision !== startRevision) return false;
     const selected = deps.getSelectedFile();
-    return deps.isFile(selected) && selected.path === path && settingsKey(currentSettings()) === key
+    return selected === file && deps.isFile(selected) && selected.path === path && settingsKey(currentSettings()) === key
       && deps.isFile(file) && file.path === path;
   }
 
@@ -284,7 +315,8 @@ function createHostController(deps = {}) {
         receipt: completed ? { link, dirty, needsCheck: false } : {
           link: null, dirty: false, needsCheck: record.stage !== 'completed'
             && !(['draft-created', 'updating-draft'].includes(record.stage) && /^[a-f0-9]{64}$/u.test(record.draftRemoteHash || '')),
-          manualRequired: ['creating', 'uploading-media'].includes(record.stage),
+          manualRequired: record.stage === 'uploading-media' || (record.stage === 'creating'
+            && !(record.schema === 2 && /^obsidian-create-[a-f0-9]{32}$/u.test(record.createAnchor))),
         },
         store,
       };
@@ -350,8 +382,20 @@ function createHostController(deps = {}) {
     let rendered;
     try { rendered = deps.renderArticle({ source, title, assetUrls }); }
     catch { rendered = { blocked: true, html: '', issues: [] }; }
-    const noteID = sha256(Buffer.from(notePath, 'utf8'));
+    const pathHash = sha256(Buffer.from(notePath, 'utf8'));
+    let noteID;
+    let associationBlocked = false;
+    let store;
+    try {
+      store = deps.getStore(settings);
+      if (!store || typeof store.load !== 'function') throw new Error('store_unavailable');
+      const binding = typeof store.resolve === 'function' ? await store.resolve(pathHash) : { noteID: pathHash, retired: false };
+      noteID = binding.noteID;
+      associationBlocked = binding.retired || !noteID;
+    } catch { associationBlocked = true; noteID = null; }
+    if (proposal?.newPath === notePath) associationBlocked = true;
     const contentIssues = [...new Set(resolved.issues)];
+    if (associationBlocked) contentIssues.push(proposal?.newPath === notePath ? 'association_pending' : 'store_unavailable');
     if (rendered?.blocked || typeof rendered?.html !== 'string' || !title) contentIssues.push('invalid_article');
     if (stale()) {
       revoke(candidateUrls);
@@ -362,7 +406,7 @@ function createHostController(deps = {}) {
       noteID, note, notePath, title, source, settings, key, startRevision,
       images: resolved.images, refs, html: rendered?.html || '', issueCodes: [...new Set(contentIssues)],
     };
-    const receiptState = await receiptFor(snapshot);
+    const receiptState = noteID ? await receiptFor(snapshot) : { receipt: null, store };
     if (stale()) {
       revoke(candidateUrls);
       return { status: 'stale', html: '', issues: [], noteID, canPublish: false };
@@ -385,6 +429,7 @@ function createHostController(deps = {}) {
         dirty: snapshot.receipt?.dirty === true,
         needsCheck: snapshot.receipt?.needsCheck === true,
         manualRequired: snapshot.receipt?.manualRequired === true,
+        canRestore: proposal?.newPath === notePath && proposal.state === 'ready',
       };
       onPreview(preview);
       return preview;
@@ -404,7 +449,11 @@ function createHostController(deps = {}) {
         const bytes = asBytes(await deps.readBinary(image.file));
         if (!bytes || bytes.byteLength !== image.bytes.byteLength || sha256(bytes) !== image.hash) return false;
       }
-      return isSelected(snapshot.note, snapshot.notePath, snapshot.startRevision, snapshot.key);
+      if (!isSelected(snapshot.note, snapshot.notePath, snapshot.startRevision, snapshot.key)) return false;
+      const hash = sha256(Buffer.from(snapshot.notePath, 'utf8'));
+      const binding = typeof snapshot.store.resolve === 'function' ? await snapshot.store.resolve(hash) : { noteID: hash, retired: false };
+      return !binding.retired && binding.noteID === snapshot.noteID
+        && isSelected(snapshot.note, snapshot.notePath, snapshot.startRevision, snapshot.key);
     } catch {
       return false;
     }
@@ -524,6 +573,64 @@ function createHostController(deps = {}) {
     });
   }
 
+  function captureAssociationTarget() {
+    const file = deps.getSelectedFile();
+    if (!deps.isFile(file) || String(file.extension).toLowerCase() !== 'md') return null;
+    return Object.freeze({ file, path: file.path, revision, key: settingsKey(currentSettings()) });
+  }
+
+  async function restoreAssociation(oldPath, token = captureAssociationTarget()) {
+    return exclusive(async () => {
+      if (typeof oldPath !== 'string' || !oldPath || oldPath.length > 4096
+          || /[\u0000-\u001f\u007f\\:]/u.test(oldPath) || oldPath.startsWith('/')
+          || oldPath.split('/').some(part => !part || part === '.' || part === '..')) {
+        return { status: 'blocked', reason: 'old-path-required' };
+      }
+      const selected = token?.file;
+      if (!selected || !isSelected(selected, token.path, token.revision, token.key)
+          || String(selected.extension).toLowerCase() !== 'md'
+          || selected.path === oldPath) return { status: 'blocked', reason: 'input-changed' };
+      const startRevision = token.revision;
+      const settings = currentSettings();
+      const key = token.key;
+      const newPath = token.path;
+      const current = async () => {
+        if (!isSelected(selected, newPath, startRevision, key)) return false;
+        try { const latest = await deps.readSource(selected); return latest === source
+          && isSelected(selected, newPath, startRevision, key); } catch { return false; }
+      };
+      let source;
+      try { source = await loadSource(selected); } catch { return { status: 'blocked', reason: 'invalid-note' }; }
+      if (!await current()) return { status: 'blocked', reason: 'input-changed' };
+      if (typeof deps.pathExists !== 'function' || deps.pathExists(oldPath)) return { status: 'blocked', reason: 'old-path-exists' };
+      const activeRuntime = runtimeFor(settings);
+      if (activeRuntime.error || typeof activeRuntime.store.resolve !== 'function'
+          || typeof activeRuntime.store.bind !== 'function'
+          || typeof activeRuntime.publisher.checkReceipt !== 'function') return { status: 'blocked', reason: 'store-unavailable' };
+      const oldHash = sha256(Buffer.from(oldPath, 'utf8'));
+      const newHash = sha256(Buffer.from(newPath, 'utf8'));
+      let oldBinding, target, receipt;
+      try {
+        oldBinding = await activeRuntime.store.resolve(oldHash);
+        target = await activeRuntime.store.resolve(newHash);
+      } catch { return { status: 'blocked', reason: 'store-unavailable' }; }
+      if (!oldBinding.noteID || oldBinding.retired
+          || (!target.retired && target.noteID !== newHash && target.noteID !== oldBinding.noteID)) return { status: 'blocked', reason: 'association-conflict' };
+      if (!await current() || deps.pathExists(oldPath)) return { status: 'blocked', reason: 'input-changed' };
+      receipt = await activeRuntime.publisher.checkReceipt(oldBinding.noteID);
+      if (receipt.status !== 'confirmed') return { status: 'blocked', reason: receipt.reason || 'receipt-unavailable' };
+      if (!await current() || deps.pathExists(oldPath)) return { status: 'blocked', reason: 'input-changed' };
+      try { await activeRuntime.store.bind(oldHash, newHash, oldBinding.noteID, receipt.digest,
+        async () => await current() && !deps.pathExists(oldPath)); }
+      catch { return { status: 'blocked', reason: 'association-save-failed' }; }
+      const unchanged = await current();
+      if (unchanged && proposal?.newPath === newPath) proposal = null;
+      invalidate('association-restored');
+      if (!unchanged) return { status: 'blocked', reason: 'input-changed' };
+      return { status: 'restored', message: '关联已恢复，请核对后更新' };
+    });
+  }
+
   async function refresh() {
     if (disposed) return { status: 'stale', html: '', issues: [], canPublish: false };
     const startRevision = revision;
@@ -550,7 +657,8 @@ function createHostController(deps = {}) {
     currentImagePaths.clear();
   }
 
-  return { refresh, publish, checkStatus, testConnection, invalidate, setSettings, dispose };
+  return { refresh, publish, checkStatus, restoreAssociation, captureAssociationTarget, noteRenamed, testConnection, invalidate, setSettings, dispose,
+    proposedOldPath: () => proposal?.state === 'ready' ? proposal.oldPath : '' };
 }
 
 module.exports = { createHostController, sanitizeSettings, issueMessage };

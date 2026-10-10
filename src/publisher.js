@@ -3,7 +3,9 @@
 const crypto = require('node:crypto');
 const { extractImageReferences, renderArticle } = require('./article');
 
-const SCHEMA = 1;
+const SCHEMA = 1; // Plan hashing remains compatible with schema 1 journals.
+const ANCHOR = /^obsidian-create-[a-f0-9]{32}$/u;
+const MARKER = 'obsidian-create-';
 const MIME_EXTENSIONS = new Map([
   ['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/gif', 'gif'],
   ['image/webp', 'webp'], ['image/avif', 'avif'], ['image/bmp', 'bmp'],
@@ -64,6 +66,12 @@ function validNoteID(noteID) {
 
 function clone(value) {
   return structuredClone(value);
+}
+
+function containsMarker(value) {
+  if (typeof value !== 'string') return false;
+  try { return decodeURIComponent(value).toLowerCase().includes(MARKER); }
+  catch { return value.toLowerCase().includes(MARKER); }
 }
 
 function result(status, fields = {}) {
@@ -162,7 +170,8 @@ function planHash(prepared, siteUrl, ownerID) {
 
 function newJournal(prepared, siteUrl, ownerID, hash, stage) {
   return {
-    schema: SCHEMA,
+    schema: 2,
+    createAnchor: MARKER + crypto.randomBytes(16).toString('hex'),
     noteID: prepared.noteID,
     siteUrl,
     ownerID,
@@ -174,9 +183,11 @@ function newJournal(prepared, siteUrl, ownerID, hash, stage) {
   };
 }
 
-function remoteSnapshot(post, ownerID, origin, expectedID) {
+function remoteSnapshot(post, ownerID, origin, expectedID, schema = 1) {
   if (!post || !Number.isSafeInteger(post.id) || post.id < 1
       || post.id !== expectedID
+      || (schema === 2 ? post.type !== 'post' : post.type !== undefined && post.type !== 'post')
+      || (schema === 2 && typeof post.slug !== 'string')
       || !Number.isSafeInteger(post.author) || post.author !== ownerID
       || typeof post.status !== 'string' || typeof post.title?.raw !== 'string'
       || typeof post.content?.raw !== 'string' || !safeHttpsUrl(post.link, origin, expectedID)) return null;
@@ -188,12 +199,22 @@ function remoteSnapshot(post, ownerID, origin, expectedID) {
     content: post.content.raw,
     link: post.link,
   };
-  return { ...values, hash: digestObject(values) };
+  return { ...values, slug: post.slug, generatedSlug: post.generated_slug,
+    hash: digestObject(schema === 2 ? { ...values, slug: post.slug } : values) };
 }
 
 function validJournal(record, noteID, siteUrl) {
   return !!record && typeof record === 'object' && !Array.isArray(record)
-    && record.schema === SCHEMA && record.noteID === noteID && record.siteUrl === siteUrl
+    && [1, 2].includes(record.schema)
+    && (record.schema === 2 ? ANCHOR.test(record.createAnchor) : !Object.hasOwn(record, 'createAnchor'))
+    && (!Object.hasOwn(record, 'createAmbiguous') || (record.schema === 2
+      && record.stage === 'creating' && record.createAmbiguous === true
+      && !Object.hasOwn(record, 'postID') && record.media?.length === 0))
+    && (!Object.hasOwn(record, 'createLookupPending') || (record.schema === 2
+      && record.stage === 'creating' && record.createLookupPending === true
+      && !Object.hasOwn(record, 'postID') && record.media?.length === 0))
+    && !(record.createAmbiguous === true && record.createLookupPending === true)
+    && record.noteID === noteID && record.siteUrl === siteUrl
     && Number.isSafeInteger(record.ownerID) && record.ownerID > 0
     && typeof record.planHash === 'string' && /^[a-f0-9]{64}$/u.test(record.planHash)
     && STABLE_STAGES.has(record.stage) && Array.isArray(record.media)
@@ -234,7 +255,8 @@ function createPublisher({ client, store, siteUrl } = {}) {
   }
 
   function pending(record, reason = 'operation-uncertain') {
-    const manualRequired = record?.stage === 'creating' || record?.stage === 'uploading-media';
+    const manualRequired = (record?.stage === 'creating' && (record?.schema !== 2
+      || record?.createAmbiguous === true || record?.createLookupPending === true)) || record?.stage === 'uploading-media';
     return result('needs-check', { ...(Number.isSafeInteger(record?.postID) ? { postID: record.postID } : {}),
       reason, ...(manualRequired ? { manualRequired: true } : {}) });
   }
@@ -290,10 +312,16 @@ function createPublisher({ client, store, siteUrl } = {}) {
   async function readAndVerify(record, prepared, expectedStatus) {
     let post;
     try { post = await client.getPost(record.postID); } catch { return null; }
-    const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID);
+    const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID, record.schema);
     const bodyHtml = render(prepared, record);
     if (!snapshot || !bodyHtml || snapshot.status !== expectedStatus
         || snapshot.title !== prepared.title || snapshot.content !== bodyHtml) return null;
+    if (record.schema === 2 && (post.type !== 'post' || typeof snapshot.slug !== 'string'
+        || containsMarker(snapshot.link))) return null;
+    if (record.schema === 2 && expectedStatus === 'publish'
+        && (!snapshot.slug || containsMarker(snapshot.slug))) return null;
+    if (record.schema === 2 && expectedStatus === 'draft' && (snapshot.slug !== ''
+        || (typeof snapshot.generatedSlug === 'string' && snapshot.generatedSlug.includes(MARKER)))) return null;
     return { post, snapshot, bodyHtml };
   }
 
@@ -302,7 +330,7 @@ function createPublisher({ client, store, siteUrl } = {}) {
     const resuming = typeof record.draftRemoteHash === 'string';
     if (!resuming) {
       let created;
-      try { created = await client.createPost({ title: prepared.title, content: '', status: 'draft' }); }
+      try { created = await client.createPost({ title: prepared.title, content: '', status: 'draft', slug: record.createAnchor }); }
       catch { return pending(record, 'create-write-uncertain'); }
       if (!Number.isSafeInteger(created?.id) || created.id < 1) return pending(record, 'create-acknowledgement-invalid');
       record.postID = created.id;
@@ -313,9 +341,11 @@ function createPublisher({ client, store, siteUrl } = {}) {
     let initial;
     try { initial = await client.getPost(record.postID); }
     catch { return pending(record, 'created-draft-readback-unavailable'); }
-    const initialSnapshot = remoteSnapshot(initial, record.ownerID, site.origin, record.postID);
+    const initialSnapshot = remoteSnapshot(initial, record.ownerID, site.origin, record.postID, record.schema);
     const initialBody = resuming && record.stage === 'updating-draft' ? render(prepared, record) : '';
-    if (!initialSnapshot || initialSnapshot.status !== 'draft' || initialSnapshot.title !== prepared.title
+    if (!initialSnapshot || (record.schema === 2 && (initial.type !== 'post'
+        || initialSnapshot.slug !== (record.stage === 'updating-draft' ? '' : record.createAnchor)))
+        || initialSnapshot.status !== 'draft' || initialSnapshot.title !== prepared.title
         || initialSnapshot.content !== initialBody
         || (resuming && initialSnapshot.hash !== record.draftRemoteHash)) return pending(record, 'created-draft-readback-mismatch');
     delete record.draftRemoteHash;
@@ -329,7 +359,7 @@ function createPublisher({ client, store, siteUrl } = {}) {
     record.expectedBodyHash = sha256(Buffer.from(bodyHtml, 'utf8'));
     if (!await saveJournal(record)) return pending(record, 'journal-unavailable');
     if (!await current(prepared)) return result('draft', { postID: record.postID, reason: 'input-changed' });
-    try { await client.updatePost(record.postID, { title: prepared.title, content: bodyHtml, status: 'draft' }); }
+    try { await client.updatePost(record.postID, { title: prepared.title, content: bodyHtml, status: 'draft', ...(record.schema === 2 ? { slug: '' } : {}) }); }
     catch { return pending(record, 'draft-write-uncertain'); }
 
     const draft = await readAndVerify(record, prepared, 'draft');
@@ -354,8 +384,10 @@ function createPublisher({ client, store, siteUrl } = {}) {
   async function publishUpdate(prepared, record) {
     let before;
     try { before = await client.getPost(record.postID); } catch { return result('needs-check', { postID: record.postID, reason: 'baseline-unavailable' }); }
-    const baseline = remoteSnapshot(before, record.ownerID, site.origin, record.postID);
-    if (!baseline || baseline.status !== 'publish' || baseline.hash !== record.remoteHash) {
+    const baseline = remoteSnapshot(before, record.ownerID, site.origin, record.postID, record.schema);
+    if (!baseline || (record.schema === 2 && (!baseline.slug || baseline.slug.includes(MARKER)
+        || containsMarker(baseline.link))) || baseline.status !== 'publish'
+        || baseline.hash !== record.remoteHash) {
       return result('conflict', { postID: record.postID, reason: 'remote-baseline-changed' });
     }
     if (record.planHash === prepared.planHash) return result('published', { postID: record.postID, link: baseline.link });
@@ -453,22 +485,65 @@ function createPublisher({ client, store, siteUrl } = {}) {
       try { record = await store.load(noteID); } catch { return result('needs-check', { reason: 'journal-unavailable' }); }
       if (!record) return result('needs-check');
       if (!validJournal(record, noteID, site.value) || record.ownerID < 1) return result('needs-check', { postID: record.postID, reason: 'journal-invalid' });
-      if (record.stage === 'creating') return pending(record, 'create-result-unavailable');
+      if (record.stage === 'creating' && record.createAmbiguous === true) return pending(record, 'create-lookup-ambiguous');
+      if (record.stage === 'creating' && record.createLookupPending === true) return pending(record, 'create-lookup-incomplete');
+      if (record.stage === 'creating' && record.schema === 1) return pending(record, 'create-result-unavailable');
       if (record.stage === 'uploading-media') return pending(record, 'media-result-unavailable');
-      if (!Number.isSafeInteger(record.postID)) return result('needs-check');
-      if (!plan || plan.noteID !== noteID) return result('needs-check', { postID: record.postID, reason: 'plan-required' });
+      if (!plan || plan.noteID !== noteID) return pending(record, 'plan-required');
       const ready = await prepareFor(plan);
       if (ready.error || ready.prepared.planHash !== record.planHash || ready.prepared.ownerID !== record.ownerID) {
-        return result('needs-check', { postID: record.postID, reason: 'plan-binding-mismatch' });
+        return pending(record, 'plan-binding-mismatch');
       }
+      if (!await current(ready.prepared)) return pending(record, 'input-changed');
+      if (record.stage === 'creating') {
+        if (typeof client.findPosts !== 'function') return pending(record, 'lookup-unavailable');
+        const guarded = { ...record, createLookupPending: true };
+        if (!await saveJournal(guarded)) return pending(record, 'journal-unavailable');
+        record = guarded;
+      }
+      if (record.stage === 'creating') {
+        let matches;
+        try { matches = await client.findPosts({ slug: record.createAnchor, status: 'any', page: 1, perPage: 2 }); }
+        catch { return pending(record, 'lookup-unavailable'); }
+        if (!Array.isArray(matches)) return pending(record, 'lookup-mismatch');
+        if (matches.length > 1) {
+          const { createLookupPending, ...withoutGuard } = record;
+          const latched = { ...withoutGuard, createAmbiguous: true };
+          if (!await saveJournal(latched)) return pending(record, 'journal-unavailable');
+          return pending(latched, 'create-lookup-ambiguous');
+        }
+        if (matches.length === 1 && (matches[0]?.slug !== record.createAnchor
+              || !Number.isSafeInteger(matches[0]?.id) || matches[0].id < 1)) return pending(record, 'lookup-mismatch');
+        if (matches.length === 0) {
+          const { createLookupPending, ...cleared } = record;
+          if (!await saveJournal(cleared)) return pending(record, 'journal-unavailable');
+          return pending(cleared, 'create-result-unavailable');
+        }
+        let post;
+        try { post = await client.getPost(matches[0].id); } catch { return pending(record, 'readback-unavailable'); }
+        const snapshot = remoteSnapshot(post, record.ownerID, site.origin, matches[0].id, record.schema);
+        if (!snapshot || post.type !== 'post' || snapshot.slug !== record.createAnchor
+            || snapshot.status !== 'draft' || snapshot.title !== ready.prepared.title
+            || snapshot.content !== '') return pending(record, 'readback-mismatch');
+        if (!await current(ready.prepared)) return pending(record, 'input-changed');
+        const { createLookupPending, ...withoutGuard } = record;
+        const next = { ...withoutGuard, postID: snapshot.id, stage: 'draft-created', draftRemoteHash: snapshot.hash };
+        if (!await saveJournal(next)) return pending(record, 'journal-unavailable');
+        return result('draft', { postID: snapshot.id, canResume: true });
+      }
+      if (!Number.isSafeInteger(record.postID)) return result('needs-check');
       if (['draft-created', 'updating-draft'].includes(record.stage)) {
         const bodyHtml = record.stage === 'draft-created' ? '' : render(ready.prepared, record);
         if (bodyHtml === null || (record.stage === 'updating-draft'
             && record.expectedBodyHash !== sha256(Buffer.from(bodyHtml, 'utf8')))) return pending(record, 'expected-content-unavailable');
         let post;
         try { post = await client.getPost(record.postID); } catch { return pending(record, 'readback-unavailable'); }
-        const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID);
-        if (!snapshot || snapshot.status !== 'draft' || snapshot.title !== ready.prepared.title
+        const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID, record.schema);
+        if (!snapshot || (record.schema === 2 && (post.type !== 'post'
+            || snapshot.slug !== (record.stage === 'updating-draft' ? '' : record.createAnchor)
+            || (record.stage === 'updating-draft' && typeof snapshot.generatedSlug === 'string'
+              && snapshot.generatedSlug.includes(MARKER))))
+            || snapshot.status !== 'draft' || snapshot.title !== ready.prepared.title
             || snapshot.content !== bodyHtml) return pending(record, 'readback-mismatch');
         if (!await current(ready.prepared)) return pending(record, 'input-changed');
         record.draftRemoteHash = snapshot.hash;
@@ -483,8 +558,10 @@ function createPublisher({ client, store, siteUrl } = {}) {
       const status = record.stage === 'updating-draft' ? 'draft' : 'publish';
       let post;
       try { post = await client.getPost(record.postID); } catch { return result('needs-check', { postID: record.postID, reason: 'readback-unavailable' }); }
-      const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID);
-      if (!snapshot || snapshot.title !== ready.prepared.title || snapshot.content !== bodyHtml
+      const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID, record.schema);
+      if (!snapshot || (record.schema === 2 && (post.type !== 'post' || !snapshot.slug
+          || containsMarker(snapshot.slug) || containsMarker(snapshot.link)))
+          || snapshot.title !== ready.prepared.title || snapshot.content !== bodyHtml
           || (record.stage === 'completed' && snapshot.hash !== record.remoteHash)) {
         return result('needs-check', { postID: record.postID, reason: 'readback-mismatch' });
       }
@@ -501,7 +578,36 @@ function createPublisher({ client, store, siteUrl } = {}) {
     });
   }
 
-  return { publish, checkStatus };
+  async function checkReceipt(noteID) {
+    if (!validNoteID(noteID)) return result('blocked', { reason: 'invalid-note-id' });
+    return serialize(noteID, async () => {
+      let record;
+      try { record = await store.load(noteID); } catch { return result('blocked', { reason: 'journal-unavailable' }); }
+      if (!validJournal(record, noteID, site.value) || record.stage !== 'completed'
+          || !Number.isSafeInteger(record.postID) || !record.link || !record.remoteHash) {
+        return result('blocked', { reason: 'receipt-unavailable' });
+      }
+      const digest = digestObject(record);
+      let identity, post;
+      try {
+        identity = await client.probe();
+        if (identity?.ownerID !== record.ownerID) return result('blocked', { reason: 'owner-mismatch' });
+        post = await client.getPost(record.postID);
+      } catch { return result('blocked', { reason: 'readback-unavailable' }); }
+      const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID, record.schema);
+      if (!snapshot || post.type !== 'post' || snapshot.status !== 'publish' || snapshot.link !== record.link
+          || snapshot.hash !== record.remoteHash
+          || (record.schema === 2 && (!snapshot.slug || containsMarker(snapshot.slug)
+            || containsMarker(snapshot.link)))) return result('conflict', { reason: 'remote-baseline-changed' });
+      try {
+        const currentRecord = await store.load(noteID);
+        if (digestObject(currentRecord) !== digest) return result('blocked', { reason: 'journal-changed' });
+      } catch { return result('blocked', { reason: 'journal-unavailable' }); }
+      return result('confirmed', { noteID, digest, postID: record.postID, link: record.link });
+    });
+  }
+
+  return { publish, checkStatus, checkReceipt };
 }
 
 module.exports = { createPublisher };

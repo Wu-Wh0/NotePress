@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const constants = require('node:fs').constants;
 const path = require('node:path');
 
-const SCHEMA = 1;
+const ANCHOR = /^obsidian-create-[a-f0-9]{32}$/u;
 const MAX_RECORD_BYTES = 256 * 1024;
 const MAX_MEDIA_ITEMS = 256;
 const HASH = /^[a-f0-9]{64}$/u;
@@ -19,7 +19,8 @@ const BASE_FIELDS = [
 ];
 const OPTIONAL_FIELDS = [
   'postID', 'link', 'remoteHash', 'expectedBodyHash',
-  'inFlightAssetHash', 'previousReceipt', 'draftRemoteHash',
+  'inFlightAssetHash', 'previousReceipt', 'draftRemoteHash', 'createAnchor',
+  'createAmbiguous', 'createLookupPending',
 ];
 const MEDIA_FIELDS = ['referenceHash', 'assetHash', 'id', 'url'];
 const BASE_SET = new Set(BASE_FIELDS);
@@ -94,7 +95,8 @@ function validMedia(media, origin) {
 
 function validRecord(record, expectedNoteID, site, allowPreviousReceipt = true) {
   if (!hasExactFields(record, BASE_FIELDS, OPTIONAL_FIELDS)) return false;
-  if (record.schema !== SCHEMA || record.noteID !== expectedNoteID || record.siteUrl !== site.value
+  if (![1, 2].includes(record.schema) || (record.schema === 2 ? !ANCHOR.test(record.createAnchor) : Object.hasOwn(record, 'createAnchor'))
+      || record.noteID !== expectedNoteID || record.siteUrl !== site.value
       || !validNoteID(record.noteID) || !Number.isSafeInteger(record.ownerID) || record.ownerID < 1
       || !HASH.test(record.planHash) || !HASH.test(record.sourceHash) || !HASH.test(record.titleHash)
       || !STAGES.has(record.stage) || !validMedia(record.media, site.origin)) return false;
@@ -104,6 +106,11 @@ function validRecord(record, expectedNoteID, site, allowPreviousReceipt = true) 
   if (record.stage === 'creating') {
     if (hasPostID || record.media.length !== 0) return false;
   } else if (!hasPostID) return false;
+  if (Object.hasOwn(record, 'createAmbiguous')
+      && (record.schema !== 2 || record.stage !== 'creating' || record.createAmbiguous !== true)) return false;
+  if (Object.hasOwn(record, 'createLookupPending')
+      && (record.schema !== 2 || record.stage !== 'creating' || record.createLookupPending !== true)) return false;
+  if (record.createAmbiguous === true && record.createLookupPending === true) return false;
 
   const hasLink = Object.hasOwn(record, 'link');
   const hasRemoteHash = Object.hasOwn(record, 'remoteHash');
@@ -134,6 +141,8 @@ function validRecord(record, expectedNoteID, site, allowPreviousReceipt = true) 
         || record.previousReceipt.siteUrl !== record.siteUrl
         || record.previousReceipt.ownerID !== record.ownerID
         || record.previousReceipt.postID !== record.postID
+        || record.previousReceipt.schema !== record.schema
+        || record.previousReceipt.createAnchor !== record.createAnchor
         || !validRecord(record.previousReceipt, expectedNoteID, site, false)) return false;
   }
   if (record.stage === 'completed' && hasPrevious) return false;
@@ -229,6 +238,106 @@ function createJournalStore({ directory, siteUrl } = {}) {
   if (typeof directory !== 'string' || directory.length === 0) throw fail('INVALID_DIRECTORY');
   const site = checkedSiteUrl(siteUrl);
   const absoluteDirectory = path.resolve(directory);
+  const associationPath = path.join(absoluteDirectory, `association-${sha256(Buffer.from(site.value, 'utf8'))}.json`);
+
+  function validIndex(value) {
+    if (!hasExactFields(value, ['schema', 'siteUrl', 'entries']) || value.schema !== 1
+        || value.siteUrl !== site.value || !isPlainRecord(value.entries)) return false;
+    const pairs = Object.entries(value.entries);
+    if (pairs.length > 1024) return false;
+    const active = new Set();
+    const canonical = new Set();
+    for (const [key, entry] of pairs) {
+      if (!HASH.test(key) || !hasExactFields(entry, ['noteID', 'active'])
+          || !HASH.test(entry.noteID) || typeof entry.active !== 'boolean') return false;
+      canonical.add(entry.noteID);
+      if (entry.active) {
+        if (active.has(entry.noteID)) return false;
+        active.add(entry.noteID);
+      }
+    }
+    return [...canonical].every(noteID => value.entries[noteID]?.noteID === noteID);
+  }
+
+  async function loadIndex() {
+    if (!await checkDirectory(absoluteDirectory, false) || !await inspectRegularFile(associationPath)) {
+      return { schema: 1, siteUrl: site.value, entries: {} };
+    }
+    let index;
+    try { index = JSON.parse((await readBytes(associationPath)).toString('utf8')); }
+    catch { throw fail('ASSOCIATION_CORRUPT'); }
+    if (!validIndex(index)) throw fail('ASSOCIATION_INVALID');
+    return index;
+  }
+
+  async function resolve(pathHash) {
+    if (!HASH.test(pathHash)) throw fail('INVALID_NOTE_ID');
+    return serialize(associationPath, async () => {
+      const index = await loadIndex();
+      const entry = index.entries[pathHash];
+      if (entry && !entry.active) return { noteID: null, retired: true };
+      return { noteID: entry?.noteID || pathHash, retired: false };
+    });
+  }
+
+  async function changeAssociation(oldHash, newHash, expectedNoteID, expectedDigest, activate, isCurrent) {
+    if (![oldHash, newHash, expectedNoteID].every(value => HASH.test(value))
+        || (activate && !HASH.test(expectedDigest)) || oldHash === newHash
+        || (isCurrent !== undefined && typeof isCurrent !== 'function')) {
+      throw fail('ASSOCIATION_INVALID');
+    }
+    return serialize(associationPath, () => serialize(journalPath(expectedNoteID).filePath, async () => {
+      await checkDirectory(absoluteDirectory, true);
+      const prior = await loadIndex();
+      const source = prior.entries[oldHash];
+      const canonical = source?.active ? source.noteID : (source ? null : oldHash);
+      const target = prior.entries[newHash];
+      if (canonical !== expectedNoteID || (target && target.noteID !== canonical)
+          || (target && target.active) || Object.entries(prior.entries).some(([key, entry]) =>
+            key !== oldHash && entry.active && entry.noteID === canonical)) throw fail('ASSOCIATION_CONFLICT');
+      const sourceRecord = await loadAt(canonical, journalPath(canonical).filePath);
+      if (!sourceRecord || (activate && (sourceRecord.stage !== 'completed'
+          || sha256(Buffer.from(JSON.stringify(sourceRecord), 'utf8')) !== expectedDigest))) throw fail('ASSOCIATION_STALE');
+      if (newHash !== canonical && await loadAt(newHash, journalPath(newHash).filePath)) throw fail('ASSOCIATION_CONFLICT');
+      const next = { schema: 1, siteUrl: site.value, entries: {
+        ...prior.entries, [oldHash]: { noteID: canonical, active: !activate },
+        [newHash]: { noteID: canonical, active: activate },
+      } };
+      if (!activate && oldHash !== canonical && !prior.entries[canonical]) throw fail('ASSOCIATION_INVALID');
+      if (!validIndex(next)) throw fail('ASSOCIATION_INVALID');
+      const bytes = Buffer.from(JSON.stringify(next), 'utf8');
+      if (bytes.length > MAX_RECORD_BYTES) throw fail('ASSOCIATION_TOO_LARGE');
+      const temporary = path.join(absoluteDirectory, `.association-${crypto.randomBytes(12).toString('hex')}.tmp`);
+      let handle;
+      try {
+        handle = await fs.open(temporary, 'wx', 0o600);
+        await handle.writeFile(bytes);
+        await handle.sync();
+        await handle.close(); handle = undefined;
+        await checkDirectory(absoluteDirectory, false);
+        if (!await inspectRegularFile(temporary) || JSON.stringify(await loadIndex()) !== JSON.stringify(prior)) throw fail('ASSOCIATION_RACE');
+        const finalRecord = await loadAt(canonical, journalPath(canonical).filePath);
+        if (!finalRecord || JSON.stringify(finalRecord) !== JSON.stringify(sourceRecord)
+            || (activate && sha256(Buffer.from(JSON.stringify(finalRecord), 'utf8')) !== expectedDigest)) throw fail('ASSOCIATION_STALE');
+        if (newHash !== canonical && await loadAt(newHash, journalPath(newHash).filePath)) throw fail('ASSOCIATION_CONFLICT');
+        if (isCurrent && await isCurrent() !== true) throw fail('ASSOCIATION_STALE');
+        await fs.rename(temporary, associationPath);
+      } catch (error) {
+        if (handle) try { await handle.close(); } catch { /* preserve error */ }
+        try { await fs.unlink(temporary); } catch { /* renamed */ }
+        throw error;
+      }
+      return canonical;
+    }));
+  }
+
+  async function reserve(oldHash, newHash, expectedNoteID, isCurrent) {
+    return changeAssociation(oldHash, newHash, expectedNoteID, null, false, isCurrent);
+  }
+
+  async function bind(oldHash, newHash, expectedNoteID, expectedDigest, isCurrent) {
+    return changeAssociation(oldHash, newHash, expectedNoteID, expectedDigest, true, isCurrent);
+  }
 
   function journalPath(noteID) {
     if (!validNoteID(noteID)) throw fail('INVALID_NOTE_ID');
@@ -298,7 +407,7 @@ function createJournalStore({ directory, siteUrl } = {}) {
     });
   }
 
-  return { load, save };
+  return { load, save, resolve, reserve, bind };
 }
 
 module.exports = { createJournalStore };

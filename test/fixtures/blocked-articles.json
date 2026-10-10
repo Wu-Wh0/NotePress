@@ -1,0 +1,37 @@
+[
+  {
+    "name": "原始 HTML",
+    "source": "<div onclick=\"alert(1)\">SIMULATED</div>",
+    "expectedIssue": "raw_html"
+  },
+  {
+    "name": "危险链接协议",
+    "source": "[SIMULATED](javascript:alert(1))",
+    "expectedIssue": "unsafe_link"
+  },
+  {
+    "name": "非图片笔记嵌入",
+    "source": "![[Synthetic/Unopened-Embed-7392.md]]",
+    "expectedIssue": "unsupported_note_embed"
+  },
+  {
+    "name": "动态 Dataview",
+    "source": "```dataview\nTABLE file.name\n```",
+    "expectedIssue": "dynamic_content"
+  },
+  {
+    "name": "缺少图片映射",
+    "source": "![缺图](missing-synthetic.png)",
+    "expectedIssue": "missing_asset"
+  },
+  {
+    "name": "隐藏 Obsidian 注释",
+    "source": "公开 %%SIMULATED_HIDDEN%%",
+    "expectedIssue": "unsupported_hidden_comment"
+  },
+  {
+    "name": "不支持的公式命令",
+    "source": "公式 $\\unknowncommand$",
+    "expectedIssue": "render_failed"
+  }
+]

@@ -103,6 +103,24 @@ test('manual reconciliation is visible after reload and does not promise automat
   }
 });
 
+test('only anchored schema 2 creating offers a read-only status check', async () => {
+  let saved = 0;
+  const f = fixture({ store: { async load() { return { schema: 2,
+    createAnchor: `obsidian-create-${'a'.repeat(32)}`, siteUrl: 'https://blog.example', stage: 'creating', media: [] }; },
+  async save() { saved += 1; } }, publisherHooks: {
+    checkStatus: async () => ({ status: 'draft', postID: 9, canResume: true }),
+  } });
+  const preview = await f.controller.refresh();
+  assert.equal(preview.needsCheck, true);
+  assert.equal(preview.manualRequired, false);
+  assert.equal(f.counters.checkStatus, 0);
+  assert.equal(saved, 0);
+  await f.controller.checkStatus();
+  assert.equal(f.counters.checkStatus, 1);
+  assert.equal(f.counters.publish, 0);
+  f.controller.dispose();
+});
+
 test('preview resolves only the selected note image and never probes or writes', async () => {
   const f = fixture({ source: '正文 ![cover](assets/pic.png)', files: { 'notes/assets/pic.png': Buffer.from('image') } });
   const preview = await f.controller.refresh();
