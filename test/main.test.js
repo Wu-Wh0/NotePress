@@ -130,18 +130,30 @@ function makeApp() {
   const note = new FakeTFile('Drafts/post.md');
   const listeners = { workspace: {}, vault: {} };
   const markdownView = { file: note, editor: { getValue: () => '# Preview body' } };
-  const activeLeaf = { async setViewState(state) { this.state = state; } };
+  const leaves = [];
+  let createdLeafCount = 0;
+  let workspace;
+  const createLeaf = () => ({
+    async setViewState(state) {
+      await workspace.beforeSetViewState?.(this, state);
+      this.state = state;
+      if (!leaves.includes(this)) leaves.push(this);
+    },
+  });
+  workspace = {
+    getActiveFile: () => note,
+    getActiveViewOfType: () => markdownView,
+    on(name, callback) { listeners.workspace[name] = callback; return { name }; },
+    getLeavesOfType: (type) => leaves.filter(leaf => leaf.state?.type === type),
+    getRightLeaf: () => null,
+    getLeaf: () => { createdLeafCount++; return createLeaf(); },
+    get createdLeafCount() { return createdLeafCount; },
+    async revealLeaf(leaf) { this.revealed = leaf; },
+  };
   return {
     note, listeners,
     app: {
-      workspace: {
-        getActiveFile: () => note,
-        getActiveViewOfType: () => markdownView,
-        on(name, callback) { listeners.workspace[name] = callback; return { name }; },
-        getRightLeaf: () => activeLeaf,
-        getLeaf: () => activeLeaf,
-        async revealLeaf(leaf) { this.revealed = leaf; },
-      },
+      workspace,
       vault: {
         adapter: new FakeFileSystemAdapter(),
         configDir: '.obsidian',
@@ -155,6 +167,29 @@ function makeApp() {
     },
   };
 }
+
+test('openPreview coalesces concurrent opens and reveals the existing preview leaf', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+
+  const pendingOpens = [];
+  app.workspace.beforeSetViewState = () => new Promise(resolve => { pendingOpens.push(resolve); });
+  const firstOpen = plugin.openPreview();
+  const concurrentOpen = plugin.openPreview();
+  const createdBeforeOpenCompletes = app.workspace.createdLeafCount;
+  pendingOpens.forEach(resolve => resolve());
+  await Promise.all([firstOpen, concurrentOpen]);
+  assert.equal(createdBeforeOpenCompletes, 1);
+
+  app.workspace.beforeSetViewState = null;
+  const existingLeaf = app.workspace.revealed;
+  await plugin.openPreview();
+  assert.equal(app.workspace.createdLeafCount, 1);
+  assert.equal(app.workspace.revealed, existingLeaf);
+  await plugin.onunload();
+});
 
 test('native rename forwards the file and old path; preview and command open one local confirmation modal', async () => {
   const main = loadMainWithSyntheticModules();

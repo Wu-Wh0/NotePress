@@ -367,10 +367,19 @@ class NativeWordPressPlugin extends Plugin {
   }
 
   async openPreview() {
-    const leaf = this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
-    await leaf.setViewState({ type: VIEW_TYPE, active: true });
-    this.app.workspace.revealLeaf(leaf);
-    this.scheduleRefresh();
+    if (this.previewOpening) return this.previewOpening;
+    this.previewOpening = (async () => {
+      const existingLeaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+      const leaf = existingLeaf || this.app.workspace.getRightLeaf(false) || this.app.workspace.getLeaf(true);
+      await leaf.setViewState({ type: VIEW_TYPE, active: true });
+      this.app.workspace.revealLeaf(leaf);
+      this.scheduleRefresh();
+    })();
+    try {
+      await this.previewOpening;
+    } finally {
+      this.previewOpening = null;
+    }
   }
 
   openRestoreModal() {
