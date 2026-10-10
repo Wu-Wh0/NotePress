@@ -8,8 +8,8 @@
     "build": "node build.mjs"
   },
   "dependencies": {
-    "markdown-it": "14.1.0",
-    "katex": "0.16.22"
+    "markdown-it": "15.0.2",
+    "katex": "0.19.0"
   },
   "devDependencies": {
     "esbuild": "0.28.2"
