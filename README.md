@@ -42,13 +42,21 @@ Install locked dependencies separately on each operating system with `npm ci --i
 
 Tests require Node.js with `node:test`, Git for checkout-attribute verification and OpenSSL for loopback TLS fixtures. `OPENSSL_BIN` can select OpenSSL; `WORDPRESS_TEST_SCRATCH` can select transport fixture storage; other disposable fixtures use `TMPDIR` or the platform temporary directory. Do not commit dependencies, certificates, databases, credentials, generated install files or private runtime evidence.
 
+## Draft release workflow
+
+Future release tags use bare numeric semantic versions such as `0.2.0`—no `v` prefix. The workflow requires the tag to match `package.json`, both version fields in `package-lock.json`, and `manifest.json`, and refuses tags whose commit is not reachable from `main`. The existing `0.1.0` release is retained; reusing that tag fails closed whether its release is a draft or already published.
+
+The workflow creates a GitHub Draft only. It never publishes or updates an existing release, and asset uploads do not use clobbering. Before reporting the draft prepared, it validates the ZIP has exactly `main.js`, `manifest.json` and `styles.css`, checks those members against the built files, writes `SHA256SUMS.txt`, uploads all five assets (`main.js`, `manifest.json`, `styles.css`, `wordpress-publisher.zip`, `SHA256SUMS.txt`), then downloads and compares each asset and verifies the checksums. A maintainer must review the draft and manually publish it as a separate approval step.
+
+Dependabot dependency PRs must keep `build.mjs`'s exact `EXPECTED.markdownIt`, `EXPECTED.katex` and `EXPECTED.esbuild` pins synchronized with the approved exact versions in `package.json` and `package-lock.json`; do not weaken the build's pin checks. When changing the plugin version, also synchronize `EXPECTED.packageVersion`, `package.json`, both package-lock version fields, `manifest.json` and `versions.json` before release.
+
 ## Modules and evidence
 
 - `wordpress-client.js`: verified HTTPS, native REST, bounded responses and dispatched/indeterminate write errors.
 - `article.js`: safe parsing/rendering without filesystem or network access.
 - `publisher.js` and `journal-store.js`: frozen intent, durable write-ahead records, cold recovery, exact known-ID readback and conflict checks.
 - `host-controller.js` and `main.js`: current editor and image selection, event invalidation, local preview, native settings and explicit action buttons.
-- `build.mjs`: confined deterministic packaging; `.github/workflows/native-wordpress.yml`: portable tests and build on Ubuntu and Windows; `.github/workflows/release.yml`: tags build and publish `wordpress-publisher.zip`.
+- `build.mjs`: confined deterministic packaging; `.github/workflows/native-wordpress.yml`: portable tests and build on Ubuntu and Windows; `.github/workflows/release.yml`: validates a numeric version tag and prepares a verified GitHub Draft only (manual publication remains separate).
 
 Contributions, verification layers and the pull request checklist are in [CONTRIBUTING.md](CONTRIBUTING.md); vulnerability reports go through [SECURITY.md](SECURITY.md) instead of public issues.
 
