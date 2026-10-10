@@ -311,8 +311,32 @@ test('NotePress without legacy state opens its current journal store normally', 
   const { app } = makeApp(paths.vaultPath);
   const plugin = new main(app, { id: 'notepress' });
   await plugin.onload();
-  assert.ok(plugin.getJournalStore(plugin.settings));
-  assert.equal(plugin.legacyInstallState.blocked, false);
+  const diagnostic = () => {
+    const state = plugin.legacyInstallState || {};
+    const reasons = ['clean', 'not-notepress', 'unsupported-adapter', 'conflict', 'legacy-data', 'unsafe-state'];
+    const canonical = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+    const ancestors = [];
+    for (let current = paths.vaultPath; ; current = path.dirname(current)) {
+      try {
+        const stat = fs.lstatSync(current);
+        const realpath = fs.realpathSync(current);
+        ancestors.push({ path: current, isDirectory: stat.isDirectory(), isSymbolicLink: stat.isSymbolicLink(),
+          mode: stat.mode, dev: stat.dev, ino: stat.ino, realpath, realpathMatches: canonical(realpath) === canonical(current) });
+      } catch (error) { ancestors.push({ path: current, error: error.code || 'unknown' }); }
+      if (path.dirname(current) === current) break;
+    }
+    return JSON.stringify({
+      legacyInstallState: { blocked: typeof state.blocked === 'boolean' ? state.blocked : null,
+        reason: reasons.includes(state.reason) ? state.reason : typeof state.reason === 'string' ? 'other' : null },
+      settingsFieldPresence: Object.fromEntries(['siteUrl', 'username', 'secretRef', 'previewCssPath', 'uiLanguage']
+        .map(key => [key, Object.hasOwn(plugin.settings || {}, key)])),
+      vaultPath: paths.vaultPath, ancestors,
+    });
+  };
+  assert.equal(plugin.legacyInstallState?.blocked, false,
+    plugin.legacyInstallState?.blocked === false ? undefined : diagnostic());
+  const store = plugin.getJournalStore(plugin.settings);
+  assert.ok(store, store ? undefined : diagnostic());
   await plugin.onunload();
 });
 
