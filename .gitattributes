@@ -1,0 +1,7 @@
+* text=auto
+/src/** text eol=lf
+/test/** text eol=lf
+/*.json text eol=lf
+/build.mjs text eol=lf
+/styles.css text eol=lf
+/README.md text eol=lf

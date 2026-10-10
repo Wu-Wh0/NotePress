@@ -1,0 +1,241 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { extractImageReferences } = require('../src/article');
+
+test('collects only unique Markdown and Obsidian images outside code', () => {
+  const source = [
+    '![封面](assets/%E5%9B%BE%20%E4%B8%80.png)',
+    '![[assets/图 一.png|正文图片]]',
+    '![远程](https://example.test/photo.png)',
+    '`![代码](hidden.png)`',
+    '```md',
+    '![代码块](hidden-too.png)',
+    '```',
+  ].join('\n');
+
+  assert.deepEqual(extractImageReferences(source), [
+    { sourcePath: 'assets/图 一.png', alt: '封面', kind: 'local' },
+    { sourcePath: 'https://example.test/photo.png', alt: '远程', kind: 'remote' },
+  ]);
+});
+
+test('renders only wiki-link display text without exposing its target', () => {
+  const result = require('../src/article').renderArticle({
+    source: '[[Private/秘密笔记.md|公开显示]]',
+    title: '中文文章',
+  });
+
+  assert.equal(result.blocked, false);
+  assert.match(result.html, /公开显示/);
+  assert.doesNotMatch(result.html, /Private|秘密笔记/);
+  assert.deepEqual(result.conversions, [{ type: 'wikilink', display: '公开显示' }]);
+});
+
+test('blocks an article whose referenced image has no explicit asset URL', () => {
+  const result = require('../src/article').renderArticle({
+    source: '![未解析](私人附件/图片.png)',
+    title: '文章',
+  });
+
+  assert.equal(result.blocked, true);
+  assert.equal(result.html, '');
+  assert.equal(result.issues.some(issue => issue.code === 'missing_asset'), true);
+});
+
+test('renders mapped local images, escaped alt/title, and Obsidian image widths', () => {
+  const result = require('../src/article').renderArticle({
+    source: '![<封面>](images/cover.png)\n\n![[附图/详情.png|320]]',
+    title: '<文章标题>',
+    assetUrls: {
+      'images/cover.png': 'blob:https://obsidian.local/cover',
+      '附图/详情.png': 'blob:https://obsidian.local/detail',
+    },
+  });
+
+  assert.equal(result.blocked, false);
+  assert.match(result.html, /src="blob:https:\/\/obsidian\.local\/cover"/);
+  assert.match(result.html, /alt="&lt;封面&gt;"/);
+  assert.match(result.html, /src="blob:https:\/\/obsidian\.local\/detail" alt="" width="320"/);
+  assert.match(result.html, /&lt;文章标题&gt;/);
+  assert.doesNotMatch(result.html, /images\/cover\.png|附图\/详情\.png/);
+});
+
+test('blocks raw HTML and script content rather than rendering it', () => {
+  for (const source of ['<div onclick="alert(1)">正文</div>', '<script>alert(1)</script>']) {
+    const result = require('../src/article').renderArticle({ source, title: '文章' });
+    assert.equal(result.blocked, true);
+    assert.equal(result.html, '');
+    assert.equal(result.issues.some(issue => issue.code === 'raw_html'), true);
+  }
+});
+
+test('blocks Markdown links with dangerous schemes', () => {
+  const result = require('../src/article').renderArticle({
+    source: '[点我](javascript:alert(1))',
+    title: '文章',
+  });
+
+  assert.equal(result.blocked, true);
+  assert.equal(result.html, '');
+  assert.equal(result.issues.some(issue => issue.code === 'unsafe_link'), true);
+});
+
+test('renders Chinese headings, tables, and inline/block math with the installed engines', () => {
+  const result = require('../src/article').renderArticle({
+    source: '# 中文章节\n\n| 名称 | 值 |\n| --- | --- |\n| 面积 | $x^2$ |\n\n$$\n\\int_0^1 x\\,dx = \\frac12\n$$',
+    title: '数学文章',
+  });
+
+  assert.equal(result.blocked, false);
+  assert.deepEqual(result.headings, [{ level: 1, text: '中文章节' }]);
+  assert.match(result.html, /<table>/);
+  assert.match(result.html, /class="katex/);
+});
+
+test('preserves ordinary dollar prices instead of pairing them as math', () => {
+  for (const source of ['成本 $12.50，续费 $30.00/年。', '$5 and $10', '预算 $20']) {
+    const result = require('../src/article').renderArticle({ source, title: '价格' });
+    assert.equal(result.blocked, false);
+    assert.equal(result.bodyHtml, `<p>${source}</p>\n`);
+    assert.doesNotMatch(result.html, /class="katex/);
+  }
+});
+
+test('requires tight unescaped single-dollar delimiters for inline math', () => {
+  const render = source => require('../src/article').renderArticle({ source, title: '分隔符' });
+  for (const source of ['$ x$', '$x $', '$x$2', '$$x$$', '$x\\$']) {
+    const result = render(source);
+    assert.equal(result.blocked, false, source);
+    assert.doesNotMatch(result.bodyHtml, /<math/, source);
+    assert.equal(result.bodyHtml, `<p>${source.replace(/\\\$/g, '$')}</p>\n`);
+  }
+  for (const source of ['$5$', '中文$x^2$，', '$x\\$+y$']) {
+    const result = render(source);
+    assert.equal(result.blocked, false, source);
+    assert.match(result.bodyHtml, /<math>/, source);
+  }
+  assert.equal((render('$x$$y$').bodyHtml.match(/<math>/g) || []).length, 2);
+  assert.doesNotMatch(render(String.raw`\$x$`).bodyHtml, /<math>/);
+  assert.match(render(String.raw`\\$x$`).bodyHtml, /<math>/);
+  assert.equal(render('`$x$` 和 \\$5 与 \\$10').bodyHtml, '<p><code>$x$</code> 和 $5 与 $10</p>\n');
+  assert.equal(render('```\n$x$\n```').bodyHtml, '<pre><code>$x$\n</code></pre>\n');
+});
+
+test('keeps link label structure when dollar math would cross its closing bracket', () => {
+  const render = source => require('../src/article').renderArticle({ source, title: '链接数学' });
+  const crossed = render('[label $x](https://example.test)$');
+  assert.equal(crossed.blocked, false);
+  assert.match(crossed.bodyHtml, /<a href="https:\/\/example\.test">label \$x<\/a>\$/);
+  assert.doesNotMatch(crossed.bodyHtml, /class="katex/);
+
+  const inside = render('[label $x$](https://example.test)');
+  assert.equal(inside.blocked, false);
+  assert.match(inside.bodyHtml, /<a href="https:\/\/example\.test">label <span class="katex">/);
+});
+
+test('renders math after escaped or code brackets outside link labels', () => {
+  const render = source => require('../src/article').renderArticle({ source, title: '括号边界' });
+  for (const source of [String.raw`\[$x]$`, '`[` $x]$']) {
+    const result = render(source);
+    assert.equal(result.blocked, false, source);
+    assert.match(result.bodyHtml, /<math>/, source);
+  }
+});
+
+test('fails closed on invalid math without returning a partial article', () => {
+  const result = require('../src/article').renderArticle({ source: '公式：$\\unknowncommand$', title: '文章' });
+
+  assert.equal(result.blocked, true);
+  assert.equal(result.html, '');
+  assert.equal(result.issues.some(issue => issue.code === 'render_failed'), true);
+});
+
+test('blocks inline Dataview expressions instead of publishing their source code', () => {
+  const result = require('../src/article').renderArticle({
+    source: '作者: = this.file.name',
+    title: '动态内容',
+  });
+
+  assert.equal(result.blocked, true);
+  assert.equal(result.html, '');
+  assert.equal(result.issues.some(issue => issue.code === 'dynamic_content'), true);
+});
+
+test('blocks non-image note embeds without exposing their target', () => {
+  const source = '![[Private/未发布笔记.md]]';
+  const result = require('../src/article').renderArticle({ source, title: '文章' });
+
+  assert.equal(result.blocked, true);
+  assert.equal(result.html, '');
+  assert.equal(result.issues.some(issue => issue.code === 'unsupported_note_embed'), true);
+  assert.doesNotMatch(JSON.stringify(result), /Private|未发布笔记/);
+  assert.throws(() => extractImageReferences(source), { message: 'unsupported_note_embed' });
+});
+
+test('omits frontmatter metadata and its image-like values from published content', () => {
+  const source = '---\nprivate: INTERNAL_ONLY\nbanner: "![[Private/secret.png]]"\n---\n\n正文\n\n![[visible.png]]';
+  assert.deepEqual(extractImageReferences(source), [{ sourcePath: 'visible.png', alt: '', kind: 'local' }]);
+  const result = require('../src/article').renderArticle({ source, title: '文章', assetUrls: { 'visible.png': 'blob:https://obsidian.local/visible' } });
+  assert.equal(result.blocked, false);
+  assert.match(result.html, /正文/);
+  assert.doesNotMatch(result.html, /INTERNAL_ONLY|Private|secret\.png|banner:/);
+});
+
+test('fails closed on unterminated frontmatter instead of exposing metadata', () => {
+  const source = '---\nprivate: INTERNAL_ONLY\n';
+  assert.throws(() => extractImageReferences(source), { message: 'unclosed_frontmatter' });
+  const result = require('../src/article').renderArticle({ source, title: '文章' });
+  assert.equal(result.blocked, true);
+  assert.equal(result.html, '');
+});
+
+test('publishes self-contained native MathML while keeping styled KaTeX in local preview', () => {
+  const result = require('../src/article').renderArticle({
+    source: '行内 $x^2 + \\frac{a}{b}$。\n\n$$\n\\sqrt{x} + \\sum_{n=1}^{10}n\n$$',
+    title: '原生公式',
+  });
+  assert.equal(result.blocked, false);
+  assert.match(result.html, /class="katex-html"/);
+  assert.match(result.bodyHtml, /<math>/);
+  assert.match(result.bodyHtml, /<math display="block">/);
+  assert.match(result.bodyHtml, /<mfrac>/);
+  assert.match(result.bodyHtml, /<msqrt>/);
+  assert.match(result.bodyHtml, /<annotation encoding="application\/x-tex">/);
+  assert.doesNotMatch(result.bodyHtml, /katex-html|katex-mathml|style=|xmlns=|<script|<link/);
+  const oversized = require('../src/article').renderArticle({ source: Array(65).fill('$x$').join(' '), title: '公式额度' });
+  assert.equal(oversized.blocked, true);
+  assert.equal(oversized.html, '');
+  assert.equal(oversized.bodyHtml, undefined);
+});
+
+test('blocks actual Dataview inline-code expressions, including JavaScript expressions', () => {
+  for (const source of ['作者: `= this.file.name`', '`$=dv.current().private`', '`= 1 + 1`']) {
+    const result = require('../src/article').renderArticle({ source, title: '文章' });
+    assert.equal(result.blocked, true);
+    assert.equal(result.html, '');
+    assert.equal(result.issues.some(issue => issue.code === 'dynamic_content'), true);
+  }
+});
+
+test('provides publication body separately from preview wrapper and title', () => {
+  const result = require('../src/article').renderArticle({ source: '正文', title: '标题只用于预览' });
+  assert.equal(result.blocked, false);
+  assert.equal(result.bodyHtml, '<p>正文</p>\n');
+  assert.match(result.html, /article-title/);
+  assert.doesNotMatch(result.bodyHtml, /标题只用于预览|article-title|<article>/);
+});
+
+test('hidden Obsidian comments block publication and reference collection without exposing their contents', () => {
+  for (const source of ['公开 %%INTERNAL_ONLY%%', '%%\n![[Private/secret.png]]\n%%']) {
+    const result = require('../src/article').renderArticle({ source, title: '文章' });
+    assert.equal(result.blocked, true);
+    assert.equal(result.html, '');
+    assert.throws(() => extractImageReferences(source), { message: 'unsupported_hidden_comment' });
+    assert.doesNotMatch(JSON.stringify(result), /INTERNAL_ONLY|Private|secret\.png/);
+  }
+  const code = require('../src/article').renderArticle({ source: '`%%literal%%`', title: '文章' });
+  assert.equal(code.blocked, false);
+  assert.match(code.bodyHtml, /<code>%%literal%%<\/code>/);
+});
