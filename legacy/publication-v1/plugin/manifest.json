@@ -1,9 +1,0 @@
-{
-  "id": "blog-entry-preview",
-  "name": "Blog Entry Preview (Synthetic Trial)",
-  "version": "0.0.1",
-  "minAppVersion": "1.12.7",
-  "description": "Current synthetic note to CMS final preview; never approve or publish",
-  "author": "Local trial",
-  "isDesktopOnly": true
-}

@@ -6,7 +6,7 @@
 
 - [ ] The change stays inside the product boundary documented in `README.md` (single author, desktop Obsidian, native WordPress REST only).
 - [ ] No custom WordPress plugin, browser approval step, external runtime or always-on bridge is introduced as an author requirement.
-- [ ] `legacy/publication-v1/` is untouched unless the change is explicitly about that historical tree.
+
 
 ## Verification
 
