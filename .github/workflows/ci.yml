@@ -1,9 +1,9 @@
-name: Publication fast checks
+name: Legacy fast checks (manual only)
+# Historical implementation checks for legacy/publication-v1. The shipped plugin
+# lives in src/ and is covered by native-wordpress.yml. Legacy is kept for
+# reference and regression on demand only, so it no longer runs on every
+# product pull request.
 on:
-  pull_request:
-    paths:
-      - 'legacy/publication-v1/**'
-      - '.github/workflows/ci.yml'
   workflow_dispatch:
     inputs:
       full-wordpress:
