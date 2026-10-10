@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: 'chore'
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: 'chore'
+    labels:
+      - dependencies
+    open-pull-requests-limit: 3
+    groups:
+      runtime-dependencies:
+        patterns:
+          - 'markdown-it'
+          - 'katex'
+      build-dependencies:
+        patterns:
+          - 'esbuild'

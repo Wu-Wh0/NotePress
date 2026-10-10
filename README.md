@@ -48,6 +48,8 @@ Tests require Node.js with `node:test`, Git for checkout-attribute verification 
 - `article.js`: safe parsing/rendering without filesystem or network access.
 - `publisher.js` and `journal-store.js`: frozen intent, durable write-ahead records, cold recovery, exact known-ID readback and conflict checks.
 - `host-controller.js` and `main.js`: current editor and image selection, event invalidation, local preview, native settings and explicit action buttons.
-- `build.mjs`: confined deterministic packaging; `.github/workflows/native-wordpress.yml`: portable tests and build on Ubuntu and Windows.
+- `build.mjs`: confined deterministic packaging; `.github/workflows/native-wordpress.yml`: portable tests and build on Ubuntu and Windows; `.github/workflows/release.yml`: tags build and publish `wordpress-publisher.zip`.
+
+Contributions, verification layers and the pull request checklist are in [CONTRIBUTING.md](CONTRIBUTING.md); vulnerability reports go through [SECURITY.md](SECURITY.md) instead of public issues.
 
 Automated evidence covers synthetic TLS, real disk persistence and an assembled controller/renderer/publisher/store with synthetic remote responses. It does not replace native GUI acceptance, real WordPress HTTP integration, hosted checks or author approval.
