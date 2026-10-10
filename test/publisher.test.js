@@ -12,7 +12,8 @@ function fixture(options = {}) {
       state.calls.push(['createPost', fields]);
       if (options.createError) throw options.createError;
       const id = state.nextPostID++;
-      const post = { id, author: 17, status: fields.status, title: { raw: fields.title }, content: { raw: fields.content }, link: `https://blog.example/post/${id}` };
+      const post = { id, type: 'post', author: 17, status: fields.status, slug: fields.slug || 'a-title',
+        title: { raw: fields.title }, content: { raw: fields.content }, link: `https://blog.example/post/${id}` };
       state.posts.set(id, post);
       return { id };
     },
@@ -29,12 +30,18 @@ function fixture(options = {}) {
       Object.assign(post, fields);
       if (Object.hasOwn(fields, 'title')) post.title = { raw: options.filterTitle ? options.filterTitle(fields.title) : fields.title };
       if (Object.hasOwn(fields, 'content')) post.content = { raw: options.filterContent ? options.filterContent(fields.content) : fields.content };
+      if (Object.hasOwn(fields, 'slug')) post.slug = fields.slug;
+      if (fields.status === 'publish' && post.slug === '') post.slug = 'a-title';
       if (options.uncertainPublish && fields.status === 'publish') throw new Error('synthetic_uncertain_publish');
       return { id };
     },
     async getPost(id) {
       state.calls.push(['getPost', id]);
       return structuredClone(state.posts.get(id));
+    },
+    async findPosts(criteria) {
+      state.calls.push(['findPosts', criteria]);
+      return [...state.posts.values()].filter(post => post.slug === criteria.slug).map(post => structuredClone(post));
     },
   };
   const records = new Map();
@@ -46,7 +53,7 @@ function fixture(options = {}) {
       records.set(noteID, structuredClone(record));
     },
   };
-  return { state, records, client, store };
+  return { state, records, client, store, options };
 }
 
 const siteUrl = 'https://blog.example';
@@ -178,12 +185,235 @@ test('an indeterminate create remains pending and is never automatically created
   assert.equal(first.status, 'needs-check');
   assert.equal(second.status, 'needs-check');
   assert.equal(status.status, 'needs-check');
-  assert.equal(first.manualRequired, true);
-  assert.equal(second.manualRequired, true);
-  assert.equal(status.manualRequired, true);
+  assert.equal(first.manualRequired, undefined);
+  assert.equal(second.manualRequired, undefined);
+  assert.equal(status.manualRequired, undefined);
   assert.equal(status.reason, 'create-result-unavailable');
   assert.equal(f.state.calls.filter(([name]) => name === 'createPost').length, 1);
   assert.equal(f.state.posts.size, 0);
+});
+
+test('lost create ACK is claimed by one exact anchored draft without a reconciliation write', async () => {
+  const f = fixture();
+  const create = f.client.createPost;
+  f.client.createPost = async fields => { await create(fields); throw new Error('lost ACK'); };
+  const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+  assert.equal((await publisher.publish(plan())).status, 'needs-check');
+  const record = f.records.get('note-17');
+  assert.match(record.createAnchor, /^obsidian-create-[a-f0-9]{32}$/u);
+  const writes = f.state.calls.filter(([name]) => ['createPost', 'updatePost', 'uploadMedia'].includes(name)).length;
+  const checked = await publisher.checkStatus('note-17', plan());
+  assert.deepEqual(checked, { status: 'draft', postID: 1, canResume: true });
+  assert.equal(f.state.calls.filter(([name]) => ['createPost', 'updatePost', 'uploadMedia'].includes(name)).length, writes);
+});
+
+test('pre-lookup validation failures leave a lost-ACK journal untouched and allow later recovery', async () => {
+  for (const scenario of [
+    { reason: 'plan-binding-mismatch', badPlan: () => plan({ source: 'Other local text' }) },
+    { reason: 'input-changed', badPlan: () => plan({ isCurrent: () => false }) },
+  ]) {
+    const f = fixture();
+    const create = f.client.createPost;
+    f.client.createPost = async fields => { await create(fields); throw new Error('lost ACK'); };
+    const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+    assert.equal((await publisher.publish(plan())).status, 'needs-check');
+    const before = structuredClone(f.records.get('note-17'));
+    const first = await publisher.checkStatus('note-17', scenario.badPlan());
+    assert.equal(first.reason, scenario.reason);
+    assert.deepEqual(f.records.get('note-17'), before);
+    assert.equal(f.state.calls.filter(([name]) => ['findPosts', 'getPost'].includes(name)).length, 0);
+    assert.equal(f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length, 1);
+    assert.deepEqual(await publisher.checkStatus('note-17', plan()), { status: 'draft', postID: 1, canResume: true });
+    const resumed = structuredClone(f.records.get('note-17'));
+    assert.equal(resumed.createLookupPending, undefined);
+    const result = await publisher.publish(plan());
+    assert.equal(result.postID, 1);
+    assert.equal(result.status, 'published');
+    assert.equal(f.state.calls.filter(([name]) => name === 'createPost').length, 1);
+  }
+});
+
+test('anchored create lookup rejects ambiguous or altered results without any second write', async () => {
+  const mutations = [
+    () => [], posts => [posts[0], posts[0]], posts => [posts[0], posts[0], posts[0]],
+    posts => [{ ...posts[0], slug: 'other' }], posts => [{ ...posts[0], id: 0 }],
+  ];
+  for (const mutate of mutations) {
+    const f = fixture();
+    const create = f.client.createPost;
+    f.client.createPost = async fields => { await create(fields); throw new Error('lost ACK'); };
+    const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+    await publisher.publish(plan());
+    f.client.findPosts = async () => mutate([...f.state.posts.values()]);
+    const before = structuredClone(f.records.get('note-17'));
+    const writes = f.state.calls.filter(([name]) => ['createPost', 'updatePost', 'uploadMedia'].includes(name)).length;
+    assert.equal((await publisher.checkStatus('note-17', plan())).status, 'needs-check');
+    const ambiguous = mutate([...f.state.posts.values()]).length > 1;
+    assert.deepEqual(f.records.get('note-17'), ambiguous ? { ...before, createAmbiguous: true }
+      : (mutate([...f.state.posts.values()]).length === 0 ? before : { ...before, createLookupPending: true }));
+    assert.equal((await publisher.publish(plan())).status, 'needs-check');
+    assert.equal(f.state.calls.filter(([name]) => ['createPost', 'updatePost', 'uploadMedia'].includes(name)).length, writes);
+  }
+});
+
+test('failed final ambiguity save leaves a durable lookup guard that freezes cold and warm recovery', async () => {
+  const f = fixture({ failSaveAt: 3 });
+  const create = f.client.createPost;
+  f.client.createPost = async fields => { await create(fields); throw new Error('lost ACK'); };
+  const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+  assert.equal((await publisher.publish(plan())).status, 'needs-check');
+  const record = f.records.get('note-17');
+  assert.equal(record.createLookupPending, undefined);
+  const duplicate = { ...structuredClone([...f.state.posts.values()][0]), id: 2,
+    link: 'https://blog.example/post/2' };
+  f.state.posts.set(2, duplicate);
+  const beforeWrites = f.state.calls.filter(([name]) => ['createPost', 'updatePost', 'uploadMedia'].includes(name)).length;
+  const checked = await publisher.checkStatus('note-17', plan());
+  assert.equal(checked.status, 'needs-check');
+  assert.equal(checked.reason, 'journal-unavailable');
+  assert.equal(checked.canResume, undefined);
+  assert.equal(f.records.get('note-17').createAmbiguous, undefined);
+  assert.equal(f.records.get('note-17').createLookupPending, true);
+  assert.deepEqual(f.records.get('note-17'), { ...record, createLookupPending: true });
+  assert.equal(f.state.calls.filter(([name]) => ['createPost', 'updatePost', 'uploadMedia'].includes(name)).length, beforeWrites);
+  f.options.failSaveAt = undefined;
+  f.state.posts.delete(2);
+  const beforeLookups = f.state.calls.filter(([name]) => name === 'findPosts').length;
+  const cold = createPublisher({ client: f.client, store: f.store, siteUrl });
+  const frozen = await cold.checkStatus('note-17', plan());
+  assert.equal(frozen.manualRequired, true);
+  assert.equal(frozen.reason, 'create-lookup-incomplete');
+  assert.equal(frozen.postID, undefined);
+  assert.equal(f.state.calls.filter(([name]) => name === 'findPosts').length, beforeLookups);
+  assert.equal((await publisher.checkStatus('note-17', plan())).reason, 'create-lookup-incomplete');
+});
+
+test('create lookup writes its durable guard before querying and failed guard causes zero remote reads', async () => {
+  const f = fixture({ failSaveAt: 2 });
+  const create = f.client.createPost;
+  f.client.createPost = async fields => { await create(fields); throw new Error('lost ACK'); };
+  const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+  await publisher.publish(plan());
+  const beforeLookups = f.state.calls.filter(([name]) => ['findPosts', 'getPost'].includes(name)).length;
+  const beforeWrites = f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length;
+  const checked = await publisher.checkStatus('note-17', plan());
+  assert.equal(checked.reason, 'journal-unavailable');
+  assert.equal(f.state.calls.filter(([name]) => ['findPosts', 'getPost'].includes(name)).length, beforeLookups);
+  assert.equal(f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length, beforeWrites);
+});
+
+test('zero-result guard clear and unique claim save failures remain manual across cold recovery', async () => {
+  for (const mode of ['zero', 'unique']) {
+    const f = fixture({ failSaveAt: 3 });
+    const create = f.client.createPost;
+    f.client.createPost = async fields => { await create(fields); throw new Error('lost ACK'); };
+    let lookup = mode;
+    f.client.findPosts = async criteria => {
+      f.state.calls.push(['findPosts', criteria]);
+      return lookup === 'zero' ? [] : [...f.state.posts.values()].map(post => structuredClone(post));
+    };
+    const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+    await publisher.publish(plan());
+    const checked = await publisher.checkStatus('note-17', plan());
+    assert.equal(checked.reason, 'journal-unavailable', mode);
+    assert.equal(f.records.get('note-17').createLookupPending, true, mode);
+    f.options.failSaveAt = undefined;
+    lookup = 'unique';
+    const before = f.state.calls.filter(([name]) => ['findPosts', 'getPost'].includes(name)).length;
+    const cold = createPublisher({ client: f.client, store: f.store, siteUrl });
+    const frozen = await cold.checkStatus('note-17', plan());
+    assert.equal(frozen.manualRequired, true, mode);
+    assert.equal(frozen.reason, 'create-lookup-incomplete', mode);
+    assert.equal(f.state.calls.filter(([name]) => ['findPosts', 'getPost'].includes(name)).length, before, mode);
+  }
+});
+
+test('anchored create claim rejects an altered edit-context post and leaves its journal unbound', async () => {
+  const mutations = [
+    post => { delete post.type; }, post => { delete post.title.raw; },
+    post => { delete post.content.raw; }, post => { post.id += 1; },
+    post => { post.author += 1; }, post => { post.slug = 'other'; },
+    post => { post.status = 'publish'; }, post => { post.title.raw += ' changed'; },
+    post => { post.content.raw = 'remote body'; }, post => { post.link = 'https://elsewhere.example/post/1'; },
+  ];
+  for (const mutate of mutations) {
+    const f = fixture();
+    const create = f.client.createPost;
+    f.client.createPost = async fields => { await create(fields); throw new Error('lost ACK'); };
+    const get = f.client.getPost;
+    f.client.getPost = async id => { const post = await get(id); mutate(post); return post; };
+    const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+    await publisher.publish(plan());
+    const before = structuredClone(f.records.get('note-17'));
+    assert.equal((await publisher.checkStatus('note-17', plan())).status, 'needs-check');
+    assert.deepEqual(f.records.get('note-17'), { ...before, createLookupPending: true });
+    assert.equal(f.state.calls.filter(([name]) => name === 'createPost').length, 1);
+    assert.equal(f.state.calls.some(([name]) => name === 'updatePost'), false);
+  }
+});
+
+test('new draft clears the operation slug before publish and checks final slug', async () => {
+  const f = fixture();
+  const published = await createPublisher({ client: f.client, store: f.store, siteUrl }).publish(plan());
+  assert.equal(published.status, 'published');
+  const anchor = f.records.get('note-17').createAnchor;
+  assert.equal(f.state.calls.find(([name]) => name === 'createPost')[1].slug, anchor);
+  assert.deepEqual(f.state.calls.filter(([name]) => name === 'updatePost').map(call => call[2]), [
+    { title: 'A title', content: f.state.posts.get(1).content.raw, status: 'draft', slug: '' },
+    { status: 'publish' },
+  ]);
+  assert.doesNotMatch(published.link, /obsidian-create-/u);
+});
+
+test('filtered slug clearing leaves a draft and never sends publish', async () => {
+  const f = fixture();
+  const update = f.client.updatePost;
+  f.client.updatePost = async (id, fields) => {
+    const result = await update(id, fields);
+    if (fields.slug === '') f.state.posts.get(id).slug = f.records.get('note-17').createAnchor;
+    return result;
+  };
+  const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+  const result = await publisher.publish(plan());
+  assert.equal(result.status, 'draft');
+  assert.equal(f.state.calls.filter(([name]) => name === 'updatePost').length, 1);
+  assert.equal((await publisher.checkStatus('note-17', plan())).canResume, undefined);
+});
+
+test('publish readback with a marker slug or link cannot be reported successful', async () => {
+  for (const corrupt of [
+    (post, anchor) => { post.slug = anchor; },
+    (post, anchor) => { post.link = `https://blog.example/${anchor}/`; },
+  ]) {
+    const f = fixture();
+    const update = f.client.updatePost;
+    f.client.updatePost = async (id, fields) => {
+      const response = await update(id, fields);
+      if (fields.status === 'publish') corrupt(f.state.posts.get(id), f.records.get('note-17').createAnchor);
+      return response;
+    };
+    const result = await createPublisher({ client: f.client, store: f.store, siteUrl }).publish(plan());
+    assert.equal(result.status, 'needs-check');
+    assert.equal(f.records.get('note-17').stage, 'publishing');
+  }
+});
+
+test('lost draft-update ACK resumes only after readback confirms the slug was cleared', async () => {
+  const f = fixture();
+  const update = f.client.updatePost;
+  f.client.updatePost = async (id, fields) => {
+    const response = await update(id, fields);
+    if (fields.slug === '') throw new Error('lost draft ACK');
+    return response;
+  };
+  const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+  assert.equal((await publisher.publish(plan())).status, 'needs-check');
+  const writes = f.state.calls.filter(([name]) => ['createPost', 'updatePost', 'uploadMedia'].includes(name)).length;
+  assert.equal((await publisher.checkStatus('note-17', plan())).canResume, true);
+  assert.equal(f.state.calls.filter(([name]) => ['createPost', 'updatePost', 'uploadMedia'].includes(name)).length, writes);
+  f.client.updatePost = update;
+  assert.equal((await publisher.publish(plan())).status, 'published');
+  assert.equal(f.state.calls.filter(([name]) => name === 'createPost').length, 1);
 });
 
 test('an explicit update reuses the known post ID and remote drift blocks all writes', async () => {
@@ -206,6 +436,43 @@ test('an explicit update reuses the known post ID and remote drift blocks all wr
   assert.equal(writesAfter, writesBefore);
 });
 
+test('schema 1 completed receipt keeps its original baseline hash and updates the same ID', async () => {
+  const crypto = require('node:crypto');
+  const f = fixture();
+  const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+  const first = await publisher.publish(plan());
+  const record = f.records.get('note-17');
+  const post = f.state.posts.get(first.postID);
+  record.schema = 1;
+  delete record.createAnchor;
+  record.remoteHash = crypto.createHash('sha256').update(JSON.stringify({
+    id: post.id, author: post.author, status: post.status, title: post.title.raw,
+    content: post.content.raw, link: post.link,
+  })).digest('hex');
+  const updated = await publisher.publish(plan({ title: 'Legacy edit', source: 'Legacy body' }));
+  assert.equal(updated.status, 'published');
+  assert.equal(updated.postID, first.postID);
+  assert.equal(f.state.calls.filter(([name]) => name === 'createPost').length, 1);
+});
+
+test('schema 1 creating remains manual and never searches or writes', async () => {
+  const f = fixture();
+  f.client.createPost = async fields => {
+    f.state.calls.push(['createPost', fields]);
+    throw new Error('lost ACK');
+  };
+  const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+  await publisher.publish(plan());
+  const record = f.records.get('note-17');
+  record.schema = 1;
+  delete record.createAnchor;
+  const before = f.state.calls.length;
+  const result = await publisher.checkStatus('note-17', plan());
+  assert.equal(result.manualRequired, true);
+  assert.equal(result.reason, 'create-result-unavailable');
+  assert.equal(f.state.calls.length, before);
+});
+
 test('an uncertain final publish is reconciled by exact readback without another write', async () => {
   const f = fixture({ uncertainPublish: true });
   const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
@@ -220,6 +487,37 @@ test('an uncertain final publish is reconciled by exact readback without another
   assert.equal(repeated.status, 'published');
   assert.equal(f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length, callsAfterPublish);
   assert.equal(f.records.get('note-17').stage, 'completed');
+});
+
+test('uncertain publish recovery rejects non-string schema 2 slugs without writes or journal changes', async () => {
+  for (const [label, slug] of [
+    ['number', 42], ['boolean', true], ['array', []], ['object', {}], ['missing', undefined],
+  ]) {
+    const f = fixture({ uncertainPublish: true });
+    const publisher = createPublisher({ client: f.client, store: f.store, siteUrl });
+    const first = await publisher.publish(plan());
+    assert.equal(first.status, 'needs-check', label);
+    const recordBefore = structuredClone(f.records.get('note-17'));
+    const post = f.state.posts.get(first.postID);
+    const expected = {
+      id: post.id, type: post.type, author: post.author, status: post.status,
+      title: structuredClone(post.title), content: structuredClone(post.content), link: post.link,
+    };
+    if (slug === undefined) delete post.slug;
+    else post.slug = slug;
+    const writesBefore = f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length;
+
+    const checked = await publisher.checkStatus('note-17', plan());
+
+    assert.equal(checked.status, 'needs-check', label);
+    assert.deepEqual(f.records.get('note-17'), recordBefore, label);
+    assert.equal(f.state.calls.filter(([name]) => ['createPost', 'uploadMedia', 'updatePost'].includes(name)).length, writesBefore, label);
+    assert.deepEqual({
+      id: post.id, type: post.type, author: post.author, status: post.status,
+      title: post.title, content: post.content, link: post.link,
+    }, expected, label);
+    assert.equal(Object.hasOwn(post, 'slug'), slug !== undefined, label);
+  }
 });
 
 test('uncertain media remains explicitly manual across cold publisher recovery without remote writes', async () => {
