@@ -8,7 +8,7 @@ The built-in local preview provides a readable blog layout; it is not a pixel-ac
 
 1. Download `wordpress-publisher.zip` from the GitHub Release, or download its three installation files: `main.js`, `manifest.json` and `styles.css`.
 2. Place those three files directly in `<vault>/.obsidian/plugins/wordpress-publisher/` (extract the ZIP there if using it).
-3. Use Obsidian desktop 1.11.4 or later, enable the plugin, configure the WordPress HTTPS site and author username, and select an application password through Obsidian's secret storage. Plugin settings retain only the secret reference. The plugin is not listed in the Obsidian community marketplace.
+3. Use Obsidian desktop 1.11.4 or later, enable the plugin, configure the WordPress HTTPS site and author username, and select an application password through Obsidian's secret storage. Plugin settings retain only the secret reference. Choose **简体中文** or **English** for the interface (default: Simplified Chinese); this does not change article content or site settings. The plugin is not listed in the Obsidian community marketplace.
 4. Open the article and use **博客预览**. Editing and previewing never upload content. **发布文章** authorizes this article and its referenced local images; after confirmed publication, the button becomes **更新文章**. **核对结果** reads an uncertain result without retrying a write.
 
 ### WordPress application password
