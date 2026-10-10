@@ -60,9 +60,30 @@ function createMarkdown(mathOutput = 'htmlAndMathml') {
   };
 
   md.inline.ruler.before('escape', 'article_inline_math', (state, silent) => {
-    if (state.src[state.pos] !== '$' || state.src[state.pos + 1] === '$') return false;
-    const end = state.src.indexOf('$', state.pos + 1);
-    if (end <= state.pos + 1) return false;
+    const adjacentMathOpen = state.src[state.pos - 1] === '$'
+      && state.pos > 1 && state.src[state.pos - 2] !== '$';
+    if (state.src[state.pos] !== '$' || (state.src[state.pos - 1] === '$' && !adjacentMathOpen)
+        || state.src[state.pos + 1] === '$' || /\s/.test(state.src[state.pos + 1] || '')) return false;
+    let end = state.pos + 1;
+    while ((end = state.src.indexOf('$', end)) >= 0 && end < state.posMax) {
+      let slash = end - 1;
+      while (slash >= 0 && state.src[slash] === '\\') slash -= 1;
+      if ((end - slash - 1) % 2 === 0) break;
+      end += 1;
+    }
+    // Tight, unescaped delimiters keep ordinary prices and literal dollars out of KaTeX.
+    const adjacentMathClose = state.src[end + 1] === '$'
+      && state.src[end + 2] !== '$' && !/\s/.test(state.src[end + 2] || '');
+    if (end <= state.pos + 1 || end >= state.posMax || /\s/.test(state.src[end - 1])
+        || (/[0-9$]/.test(state.src[end + 1] || '') && !adjacentMathClose)) return false;
+    // parseLinkLabel uses skipToken in silent mode. Keep a structural ] visible
+    // to that scan; ordinary tokenization can still render math containing ].
+    if (silent && state.articleLinkLabelScan) {
+      for (let index = state.pos + 1; index < end; index += 1) {
+        if (state.src[index] === '\\') { index += 1; continue; }
+        if (state.src[index] === ']') return false;
+      }
+    }
     if (!silent) {
       const token = state.push('article_inline_math', '', 0);
       token.content = state.src.slice(state.pos + 1, end);
@@ -70,6 +91,13 @@ function createMarkdown(mathOutput = 'htmlAndMathml') {
     state.pos = end + 1;
     return true;
   });
+  const parseLinkLabel = md.helpers.parseLinkLabel;
+  md.helpers.parseLinkLabel = (state, start, disableNested) => {
+    const previous = state.articleLinkLabelScan;
+    state.articleLinkLabelScan = true;
+    try { return parseLinkLabel(state, start, disableNested); }
+    finally { state.articleLinkLabelScan = previous; }
+  };
   md.renderer.rules.article_inline_math = (tokens, index) => renderMath(tokens[index].content, false);
 
   md.block.ruler.before('fence', 'article_display_math', (state, start, end, silent) => {

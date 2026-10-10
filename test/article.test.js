@@ -94,6 +94,56 @@ test('renders Chinese headings, tables, and inline/block math with the installed
   assert.match(result.html, /class="katex/);
 });
 
+test('preserves ordinary dollar prices instead of pairing them as math', () => {
+  for (const source of ['成本 $12.50，续费 $30.00/年。', '$5 and $10', '预算 $20']) {
+    const result = require('../src/article').renderArticle({ source, title: '价格' });
+    assert.equal(result.blocked, false);
+    assert.equal(result.bodyHtml, `<p>${source}</p>\n`);
+    assert.doesNotMatch(result.html, /class="katex/);
+  }
+});
+
+test('requires tight unescaped single-dollar delimiters for inline math', () => {
+  const render = source => require('../src/article').renderArticle({ source, title: '分隔符' });
+  for (const source of ['$ x$', '$x $', '$x$2', '$$x$$', '$x\\$']) {
+    const result = render(source);
+    assert.equal(result.blocked, false, source);
+    assert.doesNotMatch(result.bodyHtml, /<math/, source);
+    assert.equal(result.bodyHtml, `<p>${source.replace(/\\\$/g, '$')}</p>\n`);
+  }
+  for (const source of ['$5$', '中文$x^2$，', '$x\\$+y$']) {
+    const result = render(source);
+    assert.equal(result.blocked, false, source);
+    assert.match(result.bodyHtml, /<math>/, source);
+  }
+  assert.equal((render('$x$$y$').bodyHtml.match(/<math>/g) || []).length, 2);
+  assert.doesNotMatch(render(String.raw`\$x$`).bodyHtml, /<math>/);
+  assert.match(render(String.raw`\\$x$`).bodyHtml, /<math>/);
+  assert.equal(render('`$x$` 和 \\$5 与 \\$10').bodyHtml, '<p><code>$x$</code> 和 $5 与 $10</p>\n');
+  assert.equal(render('```\n$x$\n```').bodyHtml, '<pre><code>$x$\n</code></pre>\n');
+});
+
+test('keeps link label structure when dollar math would cross its closing bracket', () => {
+  const render = source => require('../src/article').renderArticle({ source, title: '链接数学' });
+  const crossed = render('[label $x](https://example.test)$');
+  assert.equal(crossed.blocked, false);
+  assert.match(crossed.bodyHtml, /<a href="https:\/\/example\.test">label \$x<\/a>\$/);
+  assert.doesNotMatch(crossed.bodyHtml, /class="katex/);
+
+  const inside = render('[label $x$](https://example.test)');
+  assert.equal(inside.blocked, false);
+  assert.match(inside.bodyHtml, /<a href="https:\/\/example\.test">label <span class="katex">/);
+});
+
+test('renders math after escaped or code brackets outside link labels', () => {
+  const render = source => require('../src/article').renderArticle({ source, title: '括号边界' });
+  for (const source of [String.raw`\[$x]$`, '`[` $x]$']) {
+    const result = render(source);
+    assert.equal(result.blocked, false, source);
+    assert.match(result.bodyHtml, /<math>/, source);
+  }
+});
+
 test('fails closed on invalid math without returning a partial article', () => {
   const result = require('../src/article').renderArticle({ source: '公式：$\\unknowncommand$', title: '文章' });
 
