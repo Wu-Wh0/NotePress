@@ -187,7 +187,7 @@ function makeApp(basePath = 'C:/synthetic-vault') {
 function makeMigrationFixture(t) {
   const scratch = process.env.WORDPRESS_TEST_SCRATCH || os.tmpdir();
   fs.mkdirSync(scratch, { recursive: true });
-  const vaultPath = fs.mkdtempSync(path.join(scratch, 'notepress-migration-'));
+  const vaultPath = fs.realpathSync(fs.mkdtempSync(path.join(scratch, 'notepress-migration-')));
   t.after(() => fs.rmSync(vaultPath, { recursive: true, force: true }));
   const plugins = path.join(vaultPath, '.obsidian', 'plugins');
   return {
