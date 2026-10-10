@@ -15,18 +15,6 @@ on:
       - '.gitattributes'
       - '.github/workflows/native-wordpress.yml'
   pull_request:
-    paths:
-      - 'src/**'
-      - 'test/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'build.mjs'
-      - 'manifest.json'
-      - 'versions.json'
-      - 'styles.css'
-      - 'README.md'
-      - '.gitattributes'
-      - '.github/workflows/native-wordpress.yml'
   workflow_dispatch:
 permissions:
   contents: read

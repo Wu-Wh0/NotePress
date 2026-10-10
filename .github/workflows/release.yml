@@ -1,18 +1,20 @@
-name: Release install package
+name: Prepare Draft install package
 
 on:
   push:
     tags:
-      - 'v*'
+      - '[0-9]*.[0-9]*.[0-9]*'
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: native-wordpress-release-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: write
     defaults:
       run:
         shell: bash
@@ -20,6 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
@@ -27,22 +30,48 @@ jobs:
           node-version: '22.23.2'
           package-manager-cache: false
 
-      - name: Verify tag matches the declared plugin version
+      - name: Validate bare version and tagged commit ancestry
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
         run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" != "tag" || "${GITHUB_REF:-}" != "refs/tags/${RELEASE_TAG}" ]]; then
+            echo "::error::Release workflow requires the exact pushed tag ref."
+            exit 1
+          fi
           node -e '
             const fs = require("node:fs");
             const tag = process.env.RELEASE_TAG;
-            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const semver = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
+            const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
             const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
-            const expected = `v${pkg.version}`;
-            if (tag !== expected || manifest.version !== pkg.version) {
-              console.error(`tag_mismatch ${tag} ${expected} manifest=${manifest.version}`);
+            if (!semver.test(tag)) {
+              console.error(`Invalid release tag ${tag}; use bare MAJOR.MINOR.PATCH (no v prefix).`);
               process.exit(1);
             }
-            process.stdout.write(`releasing ${tag}\n`);
+            if (packageJson.version !== tag || lock.version !== tag
+                || lock.packages?.[""]?.version !== tag || manifest.version !== tag) {
+              console.error(`Release version mismatch: tag=${tag}, package=${packageJson.version}, lock=${lock.version}/${lock.packages?.[""]?.version}, manifest=${manifest.version}.`);
+              process.exit(1);
+            }
+            process.stdout.write(`Validated exact release version ${tag}.\n`);
           '
+          tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [[ "$tag_commit" != "$RELEASE_COMMIT" ]]; then
+            echo "::error::Tag ${RELEASE_TAG} does not point to the event commit ${RELEASE_COMMIT}."
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet refs/remotes/origin/main; then
+            echo "::error::The checked-out history does not contain origin/main; refusing release preparation."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+            echo "::error::Tagged commit ${tag_commit} is not reachable from main; refusing release preparation."
+            exit 1
+          fi
+          echo "Tag commit ${tag_commit} is reachable from main."
 
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
@@ -52,36 +81,155 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: npm test
 
-      - name: Build deterministic install ZIP
+      - name: Build install package
         env:
           TMPDIR: ${{ runner.temp }}
         run: npm run build
 
-      - name: Confirm the archive holds only the three installation files
+      - name: Validate ZIP and stage checksummed assets
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
         run: |
-          test -f dist/wordpress-publisher.zip
-          entries="$(unzip -Z1 dist/wordpress-publisher.zip | sort | tr '\n' ' ')"
-          echo "archive entries: ${entries}"
-          test "${entries}" = "main.js manifest.json styles.css "
+          set -euo pipefail
+          package_dir="dist/wordpress-publisher"
+          archive="dist/wordpress-publisher.zip"
+          test -s "${package_dir}/main.js"
+          test -s "${package_dir}/manifest.json"
+          test -s "${package_dir}/styles.css"
+          test -s "$archive"
+          expected_entries="$(printf '%s\n' main.js manifest.json styles.css | LC_ALL=C sort)"
+          actual_entries="$(unzip -Z1 "$archive" | LC_ALL=C sort)"
+          if [[ "$actual_entries" != "$expected_entries" ]]; then
+            printf 'Unexpected ZIP members:\n%s\n' "$actual_entries" >&2
+            exit 1
+          fi
+          unzip -tq "$archive"
+          verify_dir="$(mktemp -d "${RUNNER_TEMP}/release-archive-check.XXXXXX")"
+          asset_dir="$(mktemp -d "${RUNNER_TEMP}/release-assets.XXXXXX")"
+          trap 'rm -rf "$verify_dir"' EXIT
+          unzip -q "$archive" -d "$verify_dir"
+          for name in main.js manifest.json styles.css; do
+            cmp -- "${package_dir}/${name}" "${verify_dir}/${name}"
+            cp -- "${package_dir}/${name}" "${asset_dir}/${name}"
+          done
+          cp -- "$archive" "${asset_dir}/wordpress-publisher.zip"
+          (
+            cd "$asset_dir"
+            sha256sum main.js manifest.json styles.css wordpress-publisher.zip > SHA256SUMS.txt
+            sha256sum --check SHA256SUMS.txt
+          )
+          printf 'RELEASE_ASSET_DIR=%s\n' "$asset_dir" >> "$GITHUB_ENV"
+          echo "Validated ZIP contents, file equality, and SHA256SUMS.txt."
 
-      - name: Publish the GitHub Release
+      - name: Create Draft, upload, download, and verify all assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUNNER_TEMP: ${{ runner.temp }}
         run: |
-          notes="$(mktemp)"
-          printf '%s\n' \
-            "Desktop Obsidian plugin publishing through WordPress native HTTPS REST." \
-            "" \
-            "Install \`main.js\`, \`manifest.json\` and \`styles.css\` in" \
-            "\`<vault>/.obsidian/plugins/wordpress-publisher/\`, or extract \`wordpress-publisher.zip\` there." \
-            "" \
-            "Requires Obsidian desktop 1.11.4 or later and a WordPress application password." \
-            "" \
-            "See README.md for the supported boundary and the documented limits." > "${notes}"
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" dist/wordpress-publisher.zip --clobber
-          else
-            gh release create "${RELEASE_TAG}" dist/wordpress-publisher.zip --title "Obsidian WordPress publisher ${RELEASE_TAG}" --notes-file "${notes}"
+          set -euo pipefail
+          expected_assets=(main.js manifest.json styles.css wordpress-publisher.zip SHA256SUMS.txt)
+          expected_names="$(printf '%s\n' "${expected_assets[@]}" | LC_ALL=C sort)"
+          release_list="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[].tag_name')"
+          if printf '%s\n' "$release_list" | grep -Fqx -- "$RELEASE_TAG"; then
+            echo "::error::Release tag ${RELEASE_TAG} already exists (draft or published); refusing to change that release or any asset."
+            exit 1
           fi
-          rm -f "${notes}"
+
+          # The pushed tag already exists; the Releases API ignores target_commitish for existing tags.
+          # The tag's commit was verified above, so compare this release metadata to the repo default.
+          release_target_commitish="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+          if [[ -z "$release_target_commitish" ]]; then
+            echo "::error::Could not read the repository default branch for release readback."
+            exit 1
+          fi
+
+          notes="$(mktemp "${RUNNER_TEMP}/release-notes.XXXXXX")"
+          download_dir="$(mktemp -d "${RUNNER_TEMP}/release-readback.XXXXXX")"
+          trap 'rm -f "$notes"; rm -rf "$download_dir" "$RELEASE_ASSET_DIR"' EXIT
+          printf '%s\n' "Desktop Obsidian publishing through the WordPress native HTTPS REST API." "" "Install main.js, manifest.json and styles.css in <vault>/.obsidian/plugins/wordpress-publisher/, or extract wordpress-publisher.zip there." "" "This automation prepares a Draft only. Review the files and checksums, then publish manually after approval." "See README.md for supported behavior and limits." > "$notes"
+
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --target "$release_target_commitish" --draft --title "Obsidian WordPress publisher ${RELEASE_TAG}" --notes-file "$notes"
+          gh release upload "$RELEASE_TAG" "${RELEASE_ASSET_DIR}/main.js" "${RELEASE_ASSET_DIR}/manifest.json" "${RELEASE_ASSET_DIR}/styles.css" "${RELEASE_ASSET_DIR}/wordpress-publisher.zip" "${RELEASE_ASSET_DIR}/SHA256SUMS.txt" --repo "$GITHUB_REPOSITORY"
+
+          release_rows="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[] | [.id, .tag_name] | @tsv')"
+          release_ids=()
+          while IFS=$'\t' read -r listed_id listed_tag; do
+            [[ -z "$listed_id" && -z "$listed_tag" ]] && continue
+            if [[ "$listed_tag" == "$RELEASE_TAG" ]]; then
+              if [[ ! "$listed_id" =~ ^[0-9]+$ ]]; then
+                echo "::error::Release list returned a non-numeric ID for ${RELEASE_TAG}."
+                exit 1
+              fi
+              release_ids+=("$listed_id")
+            fi
+          done <<< "$release_rows"
+          if [[ "${#release_ids[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one release-list match for ${RELEASE_TAG}; found ${#release_ids[@]}."
+            exit 1
+          fi
+          release_id="${release_ids[0]}"
+          release_api="repos/${GITHUB_REPOSITORY}/releases/${release_id}"
+
+          declare -A release_asset_ids=()
+          release_asset_rows=""
+          verify_release_readback() {
+            local phase="$1"
+            local actual_tag actual_draft actual_target actual_assets actual_names
+            actual_tag="$(gh api "$release_api" --jq '.tag_name')"
+            actual_draft="$(gh api "$release_api" --jq '.draft')"
+            actual_target="$(gh api "$release_api" --jq '.target_commitish')"
+            actual_assets="$(gh api "$release_api" --jq '.assets[] | [.id, .name] | @tsv' | LC_ALL=C sort -k2,2)"
+            release_asset_ids=()
+            local -A seen_release_asset_ids=()
+            while IFS=$'\t' read -r asset_id asset_name; do
+              if [[ ! "$asset_id" =~ ^[0-9]+$ ]]; then
+                echo "::error::${phase} release readback included a non-numeric asset ID."
+                exit 1
+              fi
+              case "$asset_name" in
+                main.js|manifest.json|styles.css|wordpress-publisher.zip|SHA256SUMS.txt) ;;
+                *)
+                  echo "::error::${phase} release readback included unexpected asset ${asset_name}."
+                  exit 1
+                  ;;
+              esac
+              if [[ -n "${release_asset_ids[$asset_name]+x}" || -n "${seen_release_asset_ids[$asset_id]+x}" ]]; then
+                echo "::error::${phase} release readback included duplicate asset names or IDs."
+                exit 1
+              fi
+              release_asset_ids["$asset_name"]="$asset_id"
+              seen_release_asset_ids["$asset_id"]=1
+            done <<< "$actual_assets"
+            actual_names="$(printf '%s\n' "$actual_assets" | cut -f2)"
+            if [[ "$actual_tag" != "$RELEASE_TAG" || "$actual_draft" != "true" || "$actual_target" != "$release_target_commitish" || "$actual_names" != "$expected_names" ]]; then
+              echo "::error::${phase} release readback did not match the exact tag, Draft state, target_commitish, and five expected assets."
+              printf 'tag=%s draft=%s target_commitish=%s assets:\n%s\n' "$actual_tag" "$actual_draft" "$actual_target" "$actual_names" >&2
+              exit 1
+            fi
+            release_asset_rows="$actual_assets"
+          }
+
+          verify_release_readback "Initial"
+          initial_asset_rows="$release_asset_rows"
+          for asset in "${expected_assets[@]}"; do
+            asset_id="${release_asset_ids[$asset]}"
+            gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" -H "Accept: application/octet-stream" > "${download_dir}/${asset}"
+            test -s "${download_dir}/${asset}"
+            cmp -- "${RELEASE_ASSET_DIR}/${asset}" "${download_dir}/${asset}"
+          done
+          (cd "$download_dir" && sha256sum --check SHA256SUMS.txt)
+
+          verify_release_readback "Final"
+          if [[ "$release_asset_rows" != "$initial_asset_rows" ]]; then
+            echo "::error::Final release readback changed the asset names or IDs; Draft preparation is not verified."
+            exit 1
+          fi
+          {
+            printf '## Draft release prepared\n\n'
+            printf -- '- Tag: `%s` (tagged commit `%s`, reachable from `main`)\n' "$RELEASE_TAG" "$RELEASE_COMMIT"
+            printf '%s\n' '- State: Draft only; this workflow did not publish it.' '- Assets uploaded and downloaded byte-for-byte; ZIP contents and SHA256SUMS.txt verified.' '- Final publication requires a maintainer to review and publish manually.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Draft ${RELEASE_TAG} prepared and all five assets verified; not published."
