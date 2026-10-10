@@ -578,7 +578,36 @@ function createPublisher({ client, store, siteUrl } = {}) {
     });
   }
 
-  return { publish, checkStatus };
+  async function checkReceipt(noteID) {
+    if (!validNoteID(noteID)) return result('blocked', { reason: 'invalid-note-id' });
+    return serialize(noteID, async () => {
+      let record;
+      try { record = await store.load(noteID); } catch { return result('blocked', { reason: 'journal-unavailable' }); }
+      if (!validJournal(record, noteID, site.value) || record.stage !== 'completed'
+          || !Number.isSafeInteger(record.postID) || !record.link || !record.remoteHash) {
+        return result('blocked', { reason: 'receipt-unavailable' });
+      }
+      const digest = digestObject(record);
+      let identity, post;
+      try {
+        identity = await client.probe();
+        if (identity?.ownerID !== record.ownerID) return result('blocked', { reason: 'owner-mismatch' });
+        post = await client.getPost(record.postID);
+      } catch { return result('blocked', { reason: 'readback-unavailable' }); }
+      const snapshot = remoteSnapshot(post, record.ownerID, site.origin, record.postID, record.schema);
+      if (!snapshot || post.type !== 'post' || snapshot.status !== 'publish' || snapshot.link !== record.link
+          || snapshot.hash !== record.remoteHash
+          || (record.schema === 2 && (!snapshot.slug || containsMarker(snapshot.slug)
+            || containsMarker(snapshot.link)))) return result('conflict', { reason: 'remote-baseline-changed' });
+      try {
+        const currentRecord = await store.load(noteID);
+        if (digestObject(currentRecord) !== digest) return result('blocked', { reason: 'journal-changed' });
+      } catch { return result('blocked', { reason: 'journal-unavailable' }); }
+      return result('confirmed', { noteID, digest, postID: record.postID, link: record.link });
+    });
+  }
+
+  return { publish, checkStatus, checkReceipt };
 }
 
 module.exports = { createPublisher };

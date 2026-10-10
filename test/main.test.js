@@ -52,7 +52,7 @@ class FakePlugin {
   registerEvent(event) { this.registeredEvents.push(event); }
   registerView(type, factory) { this.viewType = type; this.viewFactory = factory; }
   addRibbonIcon(icon, label, callback) { this.ribbon = { icon, label, callback }; }
-  addCommand(command) { this.command = command; }
+  addCommand(command) { this.commands ||= []; this.commands.push(command); if (!this.command) this.command = command; }
   addSettingTab(tab) { this.settingsTab = tab; }
 }
 
@@ -65,6 +65,11 @@ class FakeItemView {
 
 class FakePluginSettingTab {
   constructor(app, plugin) { this.app = app; this.plugin = plugin; this.containerEl = new FakeElement('section'); }
+}
+class FakeModal {
+  constructor(app) { this.app = app; this.contentEl = new FakeElement('section'); FakeModal.last = this; }
+  open() { this.onOpen(); }
+  close() { this.closed = true; }
 }
 
 const settingComponents = [];
@@ -97,6 +102,7 @@ const fakeObsidian = {
   Plugin: FakePlugin, ItemView: FakeItemView, PluginSettingTab: FakePluginSettingTab, Setting: FakeSetting,
   SecretComponent: FakeSecretComponent, MarkdownView: FakeMarkdownView, TFile: FakeTFile,
   FileSystemAdapter: FakeFileSystemAdapter, Notice: FakeNotice,
+  Modal: FakeModal,
 };
 
 function loadMainWithSyntheticModules() {
@@ -141,6 +147,7 @@ function makeApp() {
         configDir: '.obsidian',
         cachedRead: async () => { throw new Error('cachedRead should not be used for active editor'); },
         readBinary: async () => new ArrayBuffer(0),
+        getAbstractFileByPath: () => null,
         on(name, callback) { listeners.vault[name] = callback; return { name }; },
       },
       metadataCache: { getFirstLinkpathDest: () => null },
@@ -148,6 +155,57 @@ function makeApp() {
     },
   };
 }
+
+test('native rename forwards the file and old path; preview and command open one local confirmation modal', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app, note, listeners } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+  const calls = [];
+  plugin.controller.noteRenamed = async (file, oldPath) => { calls.push([file, oldPath]); return true; };
+  plugin.controller.proposedOldPath = () => 'Drafts/post.md';
+  plugin.controller.restoreAssociation = async oldPath => { calls.push(['restore', oldPath]); return { status: 'restored', message: '关联已恢复，请核对后更新' }; };
+  note.path = 'Drafts/moved.md';
+  listeners.vault.rename(note, 'Drafts/post.md');
+  await Promise.resolve();
+  assert.deepEqual(calls[0], [note, 'Drafts/post.md']);
+  const view = plugin.viewFactory({});
+  await view.onOpen();
+  view.update({ html: '<p>test</p>', canRestore: true, canPublish: false });
+  assert.equal(view.restoreButton.hidden, false);
+  view.restoreButton.click();
+  assert.equal(FakeModal.last.oldPath, 'Drafts/post.md');
+  const confirm = settingComponents.at(-1).buttonComponent;
+  await confirm.click();
+  assert.deepEqual(calls.at(-1), ['restore', 'Drafts/post.md']);
+  assert.equal(FakeModal.last.closed, true);
+  plugin.commands.find(command => command.id === 'restore-published-association').callback();
+  assert.equal(FakeModal.last.oldPath, 'Drafts/post.md');
+  await plugin.onunload();
+  notices.length = 0;
+});
+
+test('native modal freezes opened note intent and blocks confirmation after selecting another note', async () => {
+  const main = loadMainWithSyntheticModules();
+  const { app, note, listeners } = makeApp();
+  const plugin = new main(app, { id: 'synthetic-wordpress' });
+  await plugin.onload();
+  let bindings = 0;
+  plugin.getJournalStore = () => { bindings += 1; throw new Error('should not bind'); };
+  plugin.openRestoreModal();
+  const modal = FakeModal.last;
+  assert.equal(modal.target.file, note);
+  assert.equal(modal.target.path, note.path);
+  modal.oldPath = 'Drafts/former.md';
+  app.workspace.getActiveFile = () => new FakeTFile('Drafts/other.md');
+  listeners.workspace['active-leaf-change']();
+  const confirm = settingComponents.at(-1).buttonComponent;
+  await confirm.click();
+  assert.equal(modal.closed, undefined);
+  assert.equal(bindings, 0);
+  await plugin.onunload();
+  notices.length = 0;
+});
 
 test('CommonJS plugin entry registers native preview, command, settings, and a sandboxed no-network frame', async () => {
   const main = loadMainWithSyntheticModules();
