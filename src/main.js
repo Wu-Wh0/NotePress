@@ -11,7 +11,7 @@ const { readPreviewCss, safeCustomCss } = require('./preview-css');
 const { Plugin, ItemView, PluginSettingTab, Setting, SecretComponent, MarkdownView, TFile, FileSystemAdapter, Notice } = obsidian;
 const VIEW_TYPE = 'native-wordpress-preview';
 const CONTENT_SECURITY_POLICY = "default-src 'none'; img-src blob: data:; font-src data:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';";
-const BASE_CSS = 'html,body{margin:0;padding:0;background:var(--background-primary,#17191d);color:var(--text-normal,#e5e7eb);font-family:var(--font-text,system-ui,sans-serif)}body{padding:1.25rem;line-height:1.65}article{max-width:48rem;margin:0 auto}img{max-width:100%;height:auto}.math-scroll{overflow-x:auto}.wiki-link-text{color:var(--text-accent,#93b4f4)}';
+const BASE_CSS = 'html,body{margin:0;padding:0;background:var(--background-primary,#17191d);color:var(--text-normal,#e5e7eb);font-family:var(--font-text,system-ui,sans-serif)}body{padding:1.25rem;line-height:1.65}article{max-width:48rem;min-width:0;margin:0 auto;overflow-wrap:anywhere}img{max-width:100%;height:auto}article pre{max-width:100%;box-sizing:border-box;overflow-x:auto;white-space:pre;overflow-wrap:normal}article table{display:block;max-width:100%;overflow-x:auto}.math-scroll{max-width:100%;overflow-x:auto}.wiki-link-text{color:var(--text-accent,#93b4f4)}';
 
 async function readSelectedSource(app, file) {
   const candidates = new Set();

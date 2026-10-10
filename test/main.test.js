@@ -277,6 +277,19 @@ test('frame builder rejects remote CSS imports, removes article links, and prese
   assert.equal(main.safePostUrl('https://attacker.example/post', 'https://blog.example'), '');
 });
 
+test('opaque preview document keeps wide content inside local scrollers and wraps article text', () => {
+  const main = loadMainWithSyntheticModules();
+  const html = '<article><p>long-unbroken-link-text</p><ul><li><ul><li>nested-long-text</li></ul></li></ul><pre><code>  keep all code\n  and spaces</code></pre><table><tr><td>wide cell</td></tr></table><div class="math-scroll">wide math</div></article>';
+  const frame = main.buildFrameDocument(html);
+  const css = frame.match(/<style>([\s\S]*?)<\/style>/)?.[1];
+  assert.ok(css, 'styles must be inside the iframe document');
+  assert.match(css, /article\{[^}]*overflow-wrap:anywhere/);
+  assert.match(css, /article pre\{[^}]*max-width:100%[^}]*overflow-x:auto[^}]*white-space:pre/);
+  assert.match(css, /article table\{[^}]*display:block[^}]*max-width:100%[^}]*overflow-x:auto/);
+  assert.match(css, /\.math-scroll\{[^}]*max-width:100%[^}]*overflow-x:auto/);
+  assert.ok(frame.includes(html), 'preview must retain the full code, table, list and math markup');
+});
+
 test('opaque sandbox image document uses only byte-backed local raster data URLs', () => {
   const main = loadMainWithSyntheticModules();
   const assets = new Map([['blob:synthetic/local', 'data:image/png;base64,aW1hZ2U='], ['blob:synthetic/unsafe', 'https://outside.example/image']]);

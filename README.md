@@ -2,16 +2,14 @@
 
 A desktop Obsidian plugin for local article previews and explicit publication through WordPress's native HTTPS REST API. No custom WordPress plugin, browser approval step, external Node runtime or WSL is required by the installed plugin.
 
-This is a **buildable first-version candidate**, not a production release. Native Obsidian acceptance, hosted CI and compatibility with a deployed site's theme are separate gates; local automated checks do not establish them.
+The built-in local preview provides a readable blog layout; it is not a pixel-accurate copy of an arbitrary production WordPress theme. Local automated checks alone do not establish native Obsidian behavior or deployed-theme compatibility.
 
-## Install a built candidate
+## Manual installation from a GitHub Release
 
-1. Build with `npm run build`, or obtain the resulting `dist/wordpress-publisher.zip`.
-2. Extract `main.js`, `manifest.json` and `styles.css` into `<vault>/.obsidian/plugins/wordpress-publisher/`.
-3. Enable the plugin in Obsidian desktop (manifest minimum: 1.11.4). Configure the WordPress HTTPS site and author username, and select an application password through Obsidian's secret storage. Plugin settings retain only the secret reference.
+1. Download `wordpress-publisher.zip` from the GitHub Release, or download its three installation files: `main.js`, `manifest.json` and `styles.css`.
+2. Place those three files directly in `<vault>/.obsidian/plugins/wordpress-publisher/` (extract the ZIP there if using it).
+3. Use Obsidian desktop 1.11.4 or later, enable the plugin, configure the WordPress HTTPS site and author username, and select an application password through Obsidian's secret storage. Plugin settings retain only the secret reference. The plugin is not listed in the Obsidian community marketplace.
 4. Open the article and use **博客预览**. Editing and previewing never upload content. **发布文章** authorizes this article and its referenced local images; after confirmed publication, the button becomes **更新文章**. **核对结果** reads an uncertain result without retrying a write.
-
-Do not use a primary vault or production site for candidate acceptance.
 
 ### WordPress application password
 
@@ -32,9 +30,11 @@ Optional **本地预览 CSS** accepts one explicit Vault-relative `.css` path (f
 - Local formulas keep the bundled KaTeX styling/fonts. Published formulas use native MathML without site-side JavaScript, CSS or a custom WordPress plugin; modern browsers render them directly. Typography can differ from the preview. A WordPress version or filter that removes formula content leaves a mismatching draft blocked instead of silently publishing it.
 - Wikilinks become visibly marked display text, not exported note contents or vault paths. Non-image note embeds, dynamic plugin queries, raw HTML and hidden Obsidian comments block publication. Literal comment delimiters inside code samples remain literal.
 - Only referenced images are read. Basename references must match the configured attachment location; path-qualified references must match the resolver's exact target. Unresolved or ambiguous paths block publication. Remote images are not downloaded. The sandboxed preview does not load external resources; formula fonts are included offline.
+- Old-site `/images/` URLs or root-relative paths must be deliberately migrated by the author to actual Vault attachments before publication. The plugin does not download old-site images or guess a matching Vault path.
 - Confirmed articles are updated using the same recorded remote ID. Remote changes block overwrite. A durable journal stores hashes, IDs and safe URLs, not article bodies or credentials. Note identity currently follows its vault-relative path: rename/move reconciliation is not implemented.
 - Known-ID empty or fully prepared drafts can be checked without remote writes. Exact owner/status/title/content/plan readback is saved as a draft baseline; after restart, a separate **发布文章** click rechecks that baseline and continues the same ID without repeating creation or acknowledged image uploads. Changed plans or remote drafts remain blocked. Filtered/mismatching content is not accepted or silently published. This does not resolve unknown create/media outcomes; native REST still has no transactional compare-and-swap guarantee.
-- Unknown create/media outcomes stay pending, including after restart. The UI shows **需人工核对**, pauses publication and disables automatic checking. Uncertain media is an exception even when a post ID is known: a post read cannot prove which media upload succeeded, so the plugin does not continue that operation. Check WordPress manually; do not delete the local journal or repeat creation to bypass the block. Plugin-side adoption/resumption after manual checking is not implemented. Known-ID final publication/post-update uncertainty can still be checked by exact readback. No automatic create retry or automatic adoption is provided. A client-generated identifier does not make native REST writes idempotent. Media can become publicly reachable before article publication; there is no native transaction or atomic compare-and-swap guarantee.
+- Unknown create/media outcomes stay pending, including after restart. The UI shows **需人工核对**, pauses publication and disables automatic checking. Uncertain media is an exception even when a post ID is known: a post read cannot prove which media upload succeeded, so the plugin does not continue that operation. Check WordPress manually; do not delete the local journal or repeat creation to bypass the block. Plugin-side adoption/resumption after manual checking is deferred to [issue #15](https://github.com/Wu-Wh0/Wh0-0-Blog/issues/15). Known-ID final publication/post-update uncertainty can still be checked by exact readback. No automatic create retry or automatic adoption is provided. A client-generated identifier does not make native REST writes idempotent. Media can become publicly reachable before article publication; there is no native transaction or atomic compare-and-swap guarantee.
+- Reconnecting a note after rename or move and customizing preview templates remain limits tracked in [issue #16](https://github.com/Wu-Wh0/Wh0-0-Blog/issues/16) and [issue #17](https://github.com/Wu-Wh0/Wh0-0-Blog/issues/17).
 
 ## Development
 
