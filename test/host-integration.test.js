@@ -14,12 +14,13 @@ const { createJournalStore } = require('../src/journal-store');
 function setup(directory, attachmentFolder = null) {
   const note = { path: 'notes/post.md', basename: 'post', extension: 'md', stat: { size: 30, mtime: 1 } };
   const image = { path: 'notes/assets/a.png', extension: 'png', bytes: Buffer.from('SIMULATED-image'), stat: { size: 15, mtime: 1 } };
-  const state = { source: '正文 ![a](assets/a.png)', selected: note, previews: [], writes: [], lookups: [], post: null, bytes: image.bytes };
+  const state = { source: '正文 ![a](assets/a.png)', selected: note, previews: [], writes: [], lookups: [], post: null, bytes: image.bytes,
+    vaultPaths: new Set([note.path]), ownerID: 2 };
   image.stat.size = image.bytes.length;
   const siteUrl = 'https://blog.example';
   const store = () => createJournalStore({ directory, siteUrl });
   const client = {
-    async probe() { return { ownerID: 2, capabilities: { publish_posts: true, upload_files: true } }; },
+    async probe() { return { ownerID: state.ownerID, capabilities: { publish_posts: true, upload_files: true } }; },
     async createPost(fields) { state.writes.push('create'); state.post = { id: 41, type: 'post', author: 2, title: { raw: fields.title }, content: { raw: fields.content }, status: fields.status, slug: fields.slug, link: siteUrl + '/?p=41' }; return structuredClone(state.post); },
     async getPost(id) { assert.equal(id, 41); return structuredClone(state.post); },
     async updatePost(id, fields) { assert.equal(id, 41); state.writes.push('update'); for (const [key, value] of Object.entries(fields)) { if (key === 'title' || key === 'content') state.post[key] = { raw: value }; else state.post[key] = value; } if (fields.status === 'publish' && state.post.slug === '') state.post.slug = (fields.title || state.post.title.raw).toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '') || 'post'; return structuredClone(state.post); },
@@ -43,13 +44,177 @@ function setup(directory, attachmentFolder = null) {
       getSecret: () => 'SIMULATED-only',
       getAttachmentFolderPath: async () => attachmentFolder,
       renderArticle, extractImageReferences,
-      createClient: () => client, createPublisher, getStore: store,
+      createClient: () => client, createPublisher, getStore: () => {
+        const disk = store();
+        const bind = disk.bind;
+        disk.bind = (...args) => bind(...args.slice(0, 4), async () => {
+          state.beforeBind?.();
+          return args[4]();
+        });
+        return disk;
+      },
+      pathExists: oldPath => state.vaultPaths.has(oldPath),
       createObjectURL: () => 'blob:synthetic/image', revokeObjectURL() {},
       onPreview: value => state.previews.push(value),
     });
   }
-  return { state, image, controller, client };
+  return { state, note, image, controller, client, store };
 }
+
+test('SIMULATED rename and cold move restore only local association; explicit updates reuse post 41', async t => {
+  const f = setup(await temporary(t));
+  const first = f.controller();
+  assert.equal((await first.publish()).status, 'published');
+  const oldPath = f.note.path;
+  f.state.vaultPaths.delete(oldPath);
+  f.note.path = 'notes/renamed.md';
+  f.note.basename = 'renamed';
+  f.state.vaultPaths.add(f.note.path);
+  f.state.source = '正文，已改标题';
+  await first.noteRenamed(f.note, oldPath);
+  assert.equal((await first.refresh()).canRestore, true);
+  assert.equal((await first.publish()).status, 'blocked');
+  const writesBeforeRestore = f.state.writes.length;
+  assert.equal((await first.restoreAssociation(oldPath)).status, 'restored');
+  assert.equal(f.state.writes.length, writesBeforeRestore);
+  assert.equal((await first.refresh()).dirty, true);
+  assert.equal((await first.publish()).postID, 41);
+  assert.equal(f.state.writes.filter(item => item === 'create').length, 1);
+  assert.equal(f.state.writes.filter(item => item === 'media').length, 1);
+  first.dispose();
+
+  const secondOldPath = f.note.path;
+  f.state.vaultPaths.delete(secondOldPath);
+  f.note.path = 'notes/second.md';
+  f.note.basename = 'second';
+  f.state.vaultPaths.add(f.note.path);
+  f.state.source += ' 再修改';
+  const cold = f.controller();
+  assert.equal((await cold.restoreAssociation('')).status, 'blocked');
+  assert.equal((await cold.restoreAssociation(secondOldPath)).status, 'restored');
+  assert.equal((await cold.publish()).postID, 41);
+  assert.deepEqual(f.state.writes.filter(item => item === 'create'), ['create']);
+  cold.dispose();
+});
+
+test('restore refuses remote drift, old path still present, and occupied destination without writes', async t => {
+  const f = setup(await temporary(t));
+  const c = f.controller();
+  assert.equal((await c.publish()).status, 'published');
+  const oldPath = f.note.path;
+  f.note.path = 'notes/new.md';
+  f.note.basename = 'new';
+  f.state.vaultPaths.add(f.note.path);
+  const writes = f.state.writes.length;
+  assert.equal((await c.restoreAssociation(oldPath)).reason, 'old-path-exists');
+  f.state.vaultPaths.delete(oldPath);
+  const originalContent = f.state.post.content.raw;
+  f.state.post.content.raw = 'remote drift';
+  assert.equal((await c.restoreAssociation(oldPath)).status, 'blocked');
+  assert.equal(f.state.writes.length, writes);
+  f.state.post.content.raw = originalContent;
+  const oldID = crypto.createHash('sha256').update(oldPath).digest('hex');
+  const newID = crypto.createHash('sha256').update(f.note.path).digest('hex');
+  const receipt = await f.store().load(oldID);
+  await f.store().save(newID, { ...receipt, noteID: newID });
+  assert.equal((await c.restoreAssociation(oldPath)).status, 'blocked');
+  assert.equal(f.state.writes.length, writes);
+  c.dispose();
+});
+
+test('restore blocks owner mismatch, pending journal and failed local bind without publishing', async t => {
+  const f = setup(await temporary(t));
+  const c = f.controller();
+  assert.equal((await c.publish()).status, 'published');
+  const oldPath = f.note.path;
+  f.state.vaultPaths.delete(oldPath);
+  f.note.path = 'notes/moved.md';
+  f.note.basename = 'moved';
+  f.state.vaultPaths.add(f.note.path);
+  await c.noteRenamed(f.note, oldPath);
+  const writes = f.state.writes.length;
+  f.state.ownerID = 3;
+  assert.equal((await c.restoreAssociation(oldPath)).reason, 'owner-mismatch');
+  f.state.ownerID = 2;
+  const rename = fs.rename;
+  fs.rename = async () => { throw new Error('SIMULATED-association-save-failure'); };
+  try { assert.equal((await c.restoreAssociation(oldPath)).reason, 'association-save-failed'); }
+  finally { fs.rename = rename; }
+  assert.equal((await c.publish()).status, 'blocked');
+  assert.equal(f.state.writes.length, writes);
+  c.dispose();
+
+  const cold = f.controller();
+  assert.equal((await cold.publish()).status, 'blocked');
+  assert.deepEqual(f.state.writes.filter(item => item === 'create'), ['create']);
+  assert.equal((await cold.restoreAssociation(oldPath)).status, 'restored');
+  assert.equal((await cold.publish()).postID, 41);
+  assert.deepEqual(f.state.writes.filter(item => item === 'create'), ['create']);
+  cold.dispose();
+
+  const pending = setup(await temporary(t));
+  const pendingID = crypto.createHash('sha256').update(pending.note.path).digest('hex');
+  await pending.store().save(pendingID, { schema: 1, noteID: pendingID, siteUrl: 'https://blog.example',
+    ownerID: 2, planHash: 'a'.repeat(64), sourceHash: 'a'.repeat(64), titleHash: 'a'.repeat(64),
+    stage: 'creating', media: [] });
+  const beforePath = pending.note.path;
+  pending.state.vaultPaths.delete(beforePath);
+  pending.note.path = 'notes/pending-moved.md';
+  pending.note.basename = 'pending-moved';
+  pending.state.vaultPaths.add(pending.note.path);
+  const pendingController = pending.controller();
+  await pendingController.noteRenamed(pending.note, beforePath);
+  assert.equal((await pendingController.restoreAssociation(beforePath)).status, 'blocked');
+  assert.equal((await pendingController.publish()).status, 'blocked');
+  assert.deepEqual(pending.state.writes, []);
+  pendingController.dispose();
+});
+
+test('restore rejects selection and source changes during awaited disk bind without activating target', async t => {
+  const f = setup(await temporary(t));
+  const c = f.controller();
+  assert.equal((await c.publish()).status, 'published');
+  const oldPath = f.note.path;
+  f.state.vaultPaths.delete(oldPath);
+  f.note.path = 'notes/changed-during-bind.md';
+  f.state.vaultPaths.add(f.note.path);
+  await c.noteRenamed(f.note, oldPath);
+  const writes = f.state.writes.length;
+  f.state.beforeBind = () => { f.state.source = 'changed while bind awaited'; };
+  assert.equal((await c.restoreAssociation(oldPath)).status, 'blocked');
+  delete f.state.beforeBind;
+  assert.deepEqual(await f.store().resolve(crypto.createHash('sha256').update(f.note.path).digest('hex')),
+    { noteID: null, retired: true });
+  assert.equal((await f.controller().publish()).status, 'blocked');
+  assert.equal(f.state.writes.length, writes);
+  c.dispose();
+});
+
+test('two unconfirmed online renames keep the final path blocked until original receipt is restored', async t => {
+  const f = setup(await temporary(t));
+  const c = f.controller();
+  assert.equal((await c.publish()).status, 'published');
+  const original = f.note.path;
+  f.state.vaultPaths.delete(original);
+  f.note.path = 'notes/intermediate.md';
+  f.state.vaultPaths.add(f.note.path);
+  await c.noteRenamed(f.note, original);
+  const intermediate = f.note.path;
+  f.state.vaultPaths.delete(intermediate);
+  f.note.path = 'notes/final.md';
+  f.state.vaultPaths.add(f.note.path);
+  await c.noteRenamed(f.note, intermediate);
+  assert.equal(c.proposedOldPath(), original);
+  c.dispose();
+  const cold = f.controller();
+  assert.equal((await cold.publish()).status, 'blocked');
+  assert.deepEqual(f.state.writes.filter(item => item === 'create'), ['create']);
+  assert.equal((await cold.restoreAssociation(original)).status, 'restored');
+  f.state.source += ' changed';
+  assert.equal((await cold.publish()).postID, 41);
+  assert.deepEqual(f.state.writes.filter(item => item === 'create'), ['create']);
+  cold.dispose();
+});
 
 async function temporary(t) {
   const directory = await fs.mkdtemp(path.join(process.env.TMPDIR || os.tmpdir(), 'wp-host-integration-'));

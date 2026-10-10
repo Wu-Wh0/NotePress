@@ -32,6 +32,57 @@ function record(noteID = 'host-path-hash-17', overrides = {}) {
   };
 }
 
+test('site-bound association retires old paths, survives cold stores, and fails closed on corruption or save failure', async t => {
+  const directory = path.join(await sandbox(t), 'plugin-data');
+  const store = createJournalStore({ directory, siteUrl: SITE });
+  const oldHash = '1'.repeat(64);
+  const nextHash = '2'.repeat(64);
+  const finalHash = '3'.repeat(64);
+  const receipt = record(oldHash, { stage: 'completed', postID: 17, link: `${SITE}/post/17`, remoteHash: HASH });
+  await store.save(oldHash, receipt);
+  const digest = crypto.createHash('sha256').update(JSON.stringify(receipt)).digest('hex');
+  assert.equal(await store.bind(oldHash, nextHash, oldHash, digest), oldHash);
+  assert.deepEqual(await store.resolve(oldHash), { noteID: null, retired: true });
+  assert.deepEqual(await createJournalStore({ directory, siteUrl: SITE }).resolve(nextHash), { noteID: oldHash, retired: false });
+  assert.deepEqual(await createJournalStore({ directory, siteUrl: 'https://another.example' }).resolve(nextHash), { noteID: nextHash, retired: false });
+  await assert.rejects(store.bind(oldHash, finalHash, oldHash, digest));
+  const rename = fs.rename;
+  fs.rename = async () => { throw new Error('SIMULATED-rename-failure'); };
+  try { await assert.rejects(store.bind(nextHash, finalHash, oldHash, digest)); }
+  finally { fs.rename = rename; }
+  assert.deepEqual(await store.resolve(finalHash), { noteID: finalHash, retired: false });
+  assert.equal(await store.bind(nextHash, oldHash, oldHash, digest), oldHash);
+  assert.deepEqual(await store.resolve(nextHash), { noteID: null, retired: true });
+  assert.deepEqual(await store.resolve(oldHash), { noteID: oldHash, retired: false });
+  const indexName = (await fs.readdir(directory)).find(name => name.startsWith('association-'));
+  await fs.writeFile(path.join(directory, indexName), '{broken');
+  await assert.rejects(store.resolve(nextHash));
+  await assert.rejects(store.resolve(finalHash));
+});
+
+test('association index rejects orphan, duplicate active, and rebound canonical entries', async t => {
+  const directory = path.join(await sandbox(t), 'plugin-data');
+  const store = createJournalStore({ directory, siteUrl: SITE });
+  const root = '1'.repeat(64);
+  const moved = '2'.repeat(64);
+  const other = '3'.repeat(64);
+  await store.save(root, record(root, { stage: 'completed', postID: 17, link: `${SITE}/post/17`, remoteHash: HASH }));
+  await store.reserve(root, moved, root, () => true);
+  const indexName = (await fs.readdir(directory)).find(name => name.startsWith('association-'));
+  const indexPath = path.join(directory, indexName);
+  const valid = JSON.parse(await fs.readFile(indexPath, 'utf8'));
+  const variants = [
+    { ...valid, entries: { [moved]: { noteID: root, active: false } } },
+    { ...valid, entries: { ...valid.entries, [moved]: { noteID: root, active: true } } },
+    { ...valid, entries: { ...valid.entries, [root]: { noteID: other, active: true } } },
+  ];
+  for (const index of variants) {
+    await fs.writeFile(indexPath, JSON.stringify(index));
+    await assert.rejects(store.resolve(root));
+    await assert.rejects(store.resolve(other));
+  }
+});
+
 test('real files persist across store instances and serialize concurrent same-key saves', async (t) => {
   const directory = path.join(await sandbox(t), 'plugin-data');
   const first = createJournalStore({ directory, siteUrl: SITE });
