@@ -187,7 +187,7 @@ function makeApp(basePath = 'C:/synthetic-vault') {
 function makeMigrationFixture(t) {
   const scratch = process.env.WORDPRESS_TEST_SCRATCH || os.tmpdir();
   fs.mkdirSync(scratch, { recursive: true });
-  const vaultPath = fs.realpathSync(fs.mkdtempSync(path.join(scratch, 'notepress-migration-')));
+  const vaultPath = fs.realpathSync.native(fs.mkdtempSync(path.join(scratch, 'notepress-migration-')));
   t.after(() => fs.rmSync(vaultPath, { recursive: true, force: true }));
   const plugins = path.join(vaultPath, '.obsidian', 'plugins');
   return {
@@ -319,7 +319,7 @@ test('NotePress without legacy state opens its current journal store normally', 
     for (let current = paths.vaultPath; ; current = path.dirname(current)) {
       try {
         const stat = fs.lstatSync(current);
-        const realpath = fs.realpathSync(current);
+        const realpath = fs.realpathSync.native(current);
         ancestors.push({ path: current, isDirectory: stat.isDirectory(), isSymbolicLink: stat.isSymbolicLink(),
           mode: stat.mode, dev: stat.dev, ino: stat.ino, realpath, realpathMatches: canonical(realpath) === canonical(current) });
       } catch (error) { ancestors.push({ path: current, error: error.code || 'unknown' }); }
