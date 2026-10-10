@@ -11,8 +11,8 @@ const DEFAULT_OUTPUT = path.join(DIST_ROOT, 'wordpress-publisher');
 const EXPECTED = Object.freeze({
   packageVersion: '0.1.0',
   minAppVersion: '1.11.4',
-  markdownIt: '14.1.0',
-  katex: '0.16.22',
+  markdownIt: '15.0.2',
+  katex: '0.19.0',
   esbuild: '0.28.2',
 });
 const EXTERNALS = ['obsidian', 'electron', 'node:*'];
